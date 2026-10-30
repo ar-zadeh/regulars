@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark"><title>Regulars — Stream dock</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body><div class="studio">
+<header class="topbar"><a class="brand" href="/" aria-label="Regulars home"><span aria-hidden="true">✳</span> regulars</a><span id="connection-label" class="connection-label">Connecting…</span><button class="button subtle" id="connect-twitch" type="button" hidden>Connect</button></header>
+<main class="content"><div id="notice" class="notice" role="status" hidden></div>
+<div id="view-live" class="view"><h1 id="heading-live" class="sr-only" tabindex="-1">Live chat</h1>
+<div class="dock-primary">
+<section class="dock-topics" aria-label="Chat topic overview"><div class="dock-topics-heading"><button id="dock-section-chat" class="dock-section-toggle" type="button" aria-pressed="true">Chat topics</button></div><div id="dock-topic-list" class="dock-topic-list" role="group" aria-label="Jump to a chat topic"></div><p id="dock-topics-empty" class="dock-topics-empty" hidden>Waiting for topics</p></section>
+<section class="dock-community" aria-label="Community overview"><div class="dock-community-heading"><button id="dock-section-community" class="dock-section-toggle" type="button" aria-pressed="false">Community <span class="private-label">· private</span></button><span class="sr-only"><strong id="presence-count">0</strong> regulars</span></div><div id="community-chip-list" class="dock-topic-list" role="group" aria-label="Community members and private reminders"></div><p id="community-empty" class="dock-topics-empty" hidden>No community updates</p></section>
+<section id="dock-message-stage" class="dock-reader" aria-label="Current chat message">
+<div class="dock-subject"><div class="subject-heading"><span class="subject-mark" aria-hidden="true"></span><h2 id="dock-subject-name">Chat</h2></div><span id="dock-subject-position" class="dock-counter">0 / 0</span></div>
+<div class="dock-message"><p id="dock-message-author" class="dock-author"></p><p id="dock-community-types" class="dock-community-types" hidden></p><p id="dock-message-text" class="dock-message-text">Waiting for chat.</p><p id="dock-message-empty" class="dock-empty" hidden>You're caught up.</p></div>
+<div class="dock-message-footer"><span id="dock-message-position" class="dock-counter"></span><button id="dock-message-dismiss" class="dock-dismiss" type="button" aria-keyshortcuts="F9" aria-label="Dismiss current message"><span id="dock-dismiss-label">Dismiss</span><kbd>F9</kbd><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4 10-10"/></svg></button></div>
+</section>
+<div class="dock-subject-controls"><button id="dock-subject-prev" type="button" aria-keyshortcuts="F7" aria-label="Previous topic"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m14 7-5 5 5 5"/></svg><span id="dock-prev-label">Previous topic</span><kbd>F7</kbd></button><button id="dock-subject-next" type="button" aria-keyshortcuts="F8" aria-label="Next topic"><kbd>F8</kbd><span id="dock-next-label">Next topic</span><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m10 7 5 5-5 5"/></svg></button></div>
+<div class="dock-reader-extras"><span id="dock-keyboard-hint">Hold F7 / F8 → Community</span><button id="dock-dismiss-undo" class="text-button" type="button" hidden>Undo</button></div>
+</div>
+<button id="open-stickers" type="button" class="dock-create"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a4 4 0 0 0-4 4v10a4 4 0 0 0 4 4h7l7-7V7a4 4 0 0 0-4-4Z"/><path d="M14 21v-5a2 2 0 0 1 2-2h5M8 9h.01M13 9h.01M8 13h4"/></svg><span>Make a sticker</span><span class="arrow" aria-hidden="true">↗</span></button>
+<details id="community-reminders" class="community-reminders"><summary>Private reminders</summary><section class="people-card" id="community"><div class="section-heading"><h2>Private reminders</h2><button class="button subtle pause-button" id="pause-nudges" type="button">Pause</button></div><div id="nudge-list"></div><div id="nudge-queue" class="nudge-queue" hidden><span id="nudge-position"></span><div><button id="nudge-prev" class="queue-button" type="button" aria-label="Previous reminder">←</button><button id="nudge-next" class="queue-button" type="button" aria-label="Next reminder">→</button></div></div><details class="details"><summary>Regulars here</summary><div id="presence-list" class="presence-list"></div></details></section></details>
+<details class="dock-secondary"><summary><span>Chat overview</span><span class="quiet-count"><strong id="subject-count">0</strong> <span id="subject-count-label">topics</span></span></summary><section class="conversation" id="organizer"><span class="pulse-label sr-only">Summary</span><p id="summary" class="summary">Waiting for chat.</p></section><div class="dock-diagnostics"><span id="session-label">Waiting for a stream</span><span id="updated-label">Waiting for update</span><span><strong id="sticker-count">0</strong> stickers</span></div></details>
+<section class="review-card dock-review"><span><strong id="review-total">0</strong> <span id="review-label">messages</span> to review</span><button id="open-review" class="text-button" type="button">Review →</button></section>
+</div>
+<div id="view-stickers" class="view" hidden><div class="page-heading page-heading-with-back"><div><span class="eyebrow">STICKER STUDIO</span><h1 id="heading-stickers" tabindex="-1">Make a sticker</h1></div><button id="sticker-back" type="button" class="button subtle" hidden>Back</button></div>
+<section id="sticker-subject-step" class="sticker-step"><div class="sticker-options-heading"><h2>Chat subjects</h2><button id="sticker-manual" type="button" class="button subtle">Pick messages</button></div><div id="subject-list" class="subject-list"></div><form id="search-form" class="inline-form"><label class="sr-only" for="sticker-subject">Sticker subject</label><input id="sticker-subject" placeholder="Or search a subject" required><button class="button secondary" type="submit">Find</button><details class="sticker-range"><summary>Time range</summary><div><label for="sticker-from">From</label><input id="sticker-from" type="datetime-local"><label for="sticker-to">To</label><input id="sticker-to" type="datetime-local"><span id="sticker-time-zone" class="helper"></span></div></details></form></section>
+<section id="sticker-manual-step" class="sticker-step" hidden><h2>Pick messages</h2><div id="message-list" class="message-list"></div></section>
+<section id="sticker-editor" class="sticker-step" hidden><div id="search-status" class="helper">Choose messages for your sticker.</div><div id="search-results" class="selection-list"></div><div class="action-line"><button id="generate-button" class="button primary" type="button" disabled>Create sticker brief</button></div><div id="sticker-list" class="sticker-list"></div></section>
+</div>
+<div id="view-review" class="view" hidden><div class="page-heading"><span class="eyebrow">GUARDRAILS</span><h1 id="heading-review" tabindex="-1">Review</h1><p>Messages that need your decision.</p></div><section class="panel"><div id="maybe-list"></div></section><details class="panel details manage"><summary>Manage blocked topics</summary><form id="rule-form" class="topic-form">
+                <label for="rule-topic">Topic</label><input id="rule-topic" maxlength="100" placeholder="Add a topic" required>
+                <button class="button subtle" id="rule-draft" type="button">Draft definition and examples</button>
+                <label for="rule-definition">Definition</label><input id="rule-definition" maxlength="500" placeholder="Describe the topic in one sentence" required>
+                <label for="rule-positive">Examples that match <span>(one per line)</span></label><textarea id="rule-positive" rows="3" maxlength="1500"></textarea>
+                <label for="rule-negative">Examples that do not match <span>(one per line)</span></label><textarea id="rule-negative" rows="3" maxlength="1500"></textarea>
+                <label for="rule-test-text">Test a chat message</label><input id="rule-test-text" maxlength="5000" placeholder="Type an example message">
+                <button class="button subtle" id="rule-test" type="button">Test this topic</button><div id="rule-test-result" class="helper" role="status">Testing does not enable the topic.</div>
+                <label for="rule-action">Action</label><select id="rule-action"><option value="hide">Hide from me</option><option value="delete">Keep out of chat</option></select>
+                <button class="button secondary" type="submit">Enable topic</button>
+              </form><div id="rule-list" class="rule-list"></div></details></div>
+<div id="view-awards" class="view" hidden><div class="page-heading"><span class="eyebrow">RECOGNITION</span><h1 id="heading-awards" tabindex="-1">Stream awards</h1><p>Wrap your stream to share these on your overlay.</p></div><section class="panel" id="awards"><div id="award-list"></div><details class="details manage"><summary>Award settings</summary><form id="awards-settings" class="topic-form"><label for="award-timezone">Time zone</label><input id="award-timezone" placeholder="America/New_York" required><label for="day-one-date">Day One follow date</label><input id="day-one-date" type="date"><button class="button secondary" type="submit">Save award settings</button></form></details></section></div>
+<div id="view-settings" class="view" hidden><div class="page-heading"><span class="eyebrow">YOUR STUDIO</span><h1 id="heading-settings" tabindex="-1">Settings</h1></div><section class="panel settings-panel" id="settings"><h2>Stream settings</h2><p class="helper">Rolling attendance counts streams attended within the latest window (for example, 3 of the last 5); those streams do not have to be consecutive. Consecutive attendance requires a streak of attended streams. Older attendance already discarded cannot be recovered, so larger windows and streaks become reliable as new streams are recorded.</p>
+<p class="helper">New settings affect ongoing grouping and presence. Existing reminders keep their original expiry, and finalized awards are not rewritten. Match scores affect new checks and searches, not past moderation; adjust them carefully.</p>
+<form id="config-form" novalidate><div id="config-fields">
+<fieldset class="config-group"><legend>Regulars and returns</legend><div class="config-grid">
+<div class="config-field"><label for="config-regularMode">Attendance rule</label>
+<select id="config-regularMode" aria-describedby="help-regularMode"><option value="rolling">Rolling window</option><option value="consecutive">Consecutive streams</option></select>
+<small id="help-regularMode">Choose whether the required streams must be consecutive or fall within a recent window.</small></div>
+<div class="config-field"><label for="config-regularMinimum">Streams required</label>
+<input id="config-regularMinimum" type="number" min="1" max="100" step="1" required aria-describedby="help-regularMinimum">
+<small id="help-regularMinimum">Number of streams a viewer must attend.</small></div>
+<div class="config-field"><label for="config-regularWindow">Recent stream window</label>
+<input id="config-regularWindow" type="number" min="1" max="100" step="1" required aria-describedby="help-regularWindow">
+<small id="help-regularWindow">Rolling rule only: consider this many recent streams.</small></div>
+<div class="config-field"><label for="config-returnMinPrevious">Previous streams for a return</label>
+<input id="config-returnMinPrevious" type="number" min="1" max="100" step="1" required aria-describedby="help-returnMinPrevious">
+<small id="help-returnMinPrevious">Minimum prior attendance before recognizing a returning viewer.</small></div>
+<div class="config-field"><label for="config-returnMissedSessions">Missed streams before a return</label>
+<input id="config-returnMissedSessions" type="number" min="1" max="100" step="1" required aria-describedby="help-returnMissedSessions">
+<small id="help-returnMissedSessions">How many streams a viewer must miss before returning.</small></div>
+</div></fieldset>
+<fieldset class="config-group"><legend>Conversations and hype</legend><div class="config-grid">
+<div class="config-field"><label for="config-repetitionWindowSeconds">Repeated-message window (seconds)</label>
+<input id="config-repetitionWindowSeconds" type="number" min="1" max="120" step="1" required aria-describedby="help-repetitionWindowSeconds">
+<small id="help-repetitionWindowSeconds">Combine repeated messages inside this time window.</small></div>
+<div class="config-field"><label for="config-discussionGapSeconds">Discussion gap (seconds)</label>
+<input id="config-discussionGapSeconds" type="number" min="1" max="3600" step="1" required aria-describedby="help-discussionGapSeconds">
+<small id="help-discussionGapSeconds">Close a discussion after this much inactivity.</small></div>
+<div class="config-field"><label for="config-hypeMinContributors">Minimum hype contributors</label>
+<input id="config-hypeMinContributors" type="number" min="2" max="100" step="1" required aria-describedby="help-hypeMinContributors">
+<small id="help-hypeMinContributors">Minimum people required for a hype discussion.</small></div>
+<div class="config-field"><label for="config-hypeMaxContributors">Maximum hype contributors</label>
+<input id="config-hypeMaxContributors" type="number" min="1" max="50" step="1" required aria-describedby="help-hypeMaxContributors">
+<small id="help-hypeMaxContributors">Maximum people receiving a Hype Engine award for the leading discussion at stream end.</small></div>
+<div class="config-field"><label for="config-matchThreshold">Match score</label>
+<input id="config-matchThreshold" type="number" min="0" max="1" step="0.01" required aria-describedby="help-matchThreshold">
+<small id="help-matchThreshold">Score for a strong subject or blocked topic match in new checks.</small></div>
+<div class="config-field"><label for="config-maybeThreshold">Possible match score</label>
+<input id="config-maybeThreshold" type="number" min="0" max="1" step="0.01" required aria-describedby="help-maybeThreshold">
+<small id="help-maybeThreshold">Scores from here up to the match score can trigger uncertain or review states.</small></div>
+</div></fieldset>
+<fieldset class="config-group"><legend>Recognition and reminders</legend><div class="config-grid">
+<div class="config-field"><label for="config-nightOwlStart">Night owl starts</label>
+<input id="config-nightOwlStart" type="time" required aria-describedby="help-nightOwlStart">
+<small id="help-nightOwlStart">In your award time zone.</small></div>
+<div class="config-field"><label for="config-nightOwlEnd">Night owl ends</label>
+<input id="config-nightOwlEnd" type="time" required aria-describedby="help-nightOwlEnd">
+<small id="help-nightOwlEnd">May be earlier than the start to span midnight.</small></div>
+<div class="config-field"><label for="config-nudgeCooldownSeconds">Reminder cooldown (seconds)</label>
+<input id="config-nudgeCooldownSeconds" type="number" min="0" max="3600" step="1" required aria-describedby="help-nudgeCooldownSeconds">
+<small id="help-nudgeCooldownSeconds">Minimum time between opening reminders; others wait in the queue.</small></div>
+<div class="config-field"><label for="config-maxOpenNudges">Maximum open reminders</label>
+<input id="config-maxOpenNudges" type="number" min="1" max="20" step="1" required aria-describedby="help-maxOpenNudges">
+<small id="help-maxOpenNudges">Limit the reminders shown at once.</small></div>
+<div class="config-field"><label for="config-messageNudgeExpirySeconds">Message reminder expiry (seconds)</label>
+<input id="config-messageNudgeExpirySeconds" type="number" min="1" max="3600" step="1" required aria-describedby="help-messageNudgeExpirySeconds">
+<small id="help-messageNudgeExpirySeconds">Remove an unanswered message reminder after this time.</small></div>
+<div class="config-field"><label for="config-arrivalNudgeExpirySeconds">Arrival reminder expiry (seconds)</label>
+<input id="config-arrivalNudgeExpirySeconds" type="number" min="1" max="86400" step="1" required aria-describedby="help-arrivalNudgeExpirySeconds">
+<small id="help-arrivalNudgeExpirySeconds">Remove an arrival reminder after this time.</small></div>
+</div></fieldset>
+<fieldset class="config-group"><legend>Updates and stickers</legend><div class="config-grid">
+<div class="config-field"><label for="config-summaryIntervalSeconds">Summary update interval (seconds)</label>
+<input id="config-summaryIntervalSeconds" type="number" min="1" max="300" step="1" required aria-describedby="help-summaryIntervalSeconds">
+<small id="help-summaryIntervalSeconds">How often to update the chat summary.</small></div>
+<div class="config-field"><label for="config-summaryWindowSeconds">Summary history window (seconds)</label>
+<input id="config-summaryWindowSeconds" type="number" min="1" max="3600" step="1" required aria-describedby="help-summaryWindowSeconds">
+<small id="help-summaryWindowSeconds">How far back to look for the summary.</small></div>
+<div class="config-field"><label for="config-chatterPollSeconds">Chatter refresh interval (seconds)</label>
+<input id="config-chatterPollSeconds" type="number" min="10" max="300" step="1" required aria-describedby="help-chatterPollSeconds">
+<small id="help-chatterPollSeconds">How often to refresh the chatter list.</small></div>
+<div class="config-field"><label for="config-stickerViewerCooldownSeconds">Sticker viewer cooldown (seconds)</label>
+<input id="config-stickerViewerCooldownSeconds" type="number" min="0" max="3600" step="1" required aria-describedby="help-stickerViewerCooldownSeconds">
+<small id="help-stickerViewerCooldownSeconds">Wait before the same viewer can trigger another sticker.</small></div>
+<div class="config-field"><label for="config-stickerChannelCooldownSeconds">Sticker channel cooldown (seconds)</label>
+<input id="config-stickerChannelCooldownSeconds" type="number" min="0" max="3600" step="1" required aria-describedby="help-stickerChannelCooldownSeconds">
+<small id="help-stickerChannelCooldownSeconds">Wait between sticker triggers in the channel.</small></div>
+</div></fieldset>
+</div><div class="config-actions"><button class="button primary" id="config-save" type="submit" disabled>Save settings</button><button class="button secondary" id="config-revert" type="button" disabled>Revert changes</button><button class="button subtle" id="config-reload" type="button" hidden>Retry loading</button></div><p id="config-status" class="helper" role="status" aria-live="polite">Loading settings…</p></form></section><details class="panel details manage" id="obs-hotkey-settings"><summary>OBS hotkeys</summary><p class="helper">Use F7–F9 while your game has focus.</p><button id="obs-pair-button" class="button secondary" type="button">Set up OBS hotkeys</button><label for="obs-pair-endpoint" class="helper">Server URL</label><input id="obs-pair-endpoint" readonly hidden><label for="obs-pair-code" class="helper">Pairing token</label><input id="obs-pair-code" readonly hidden><p id="obs-pair-status" class="helper" role="status"></p><a id="obs-script-link" class="text-link" href="/api/dock/script">Download OBS script ↗</a></details><details class="panel details manage" id="privacy"><summary>Privacy controls</summary><p class="helper">Viewers can also use <code>!regulars forget</code> in chat.</p><form id="forget-form" class="inline-form"><label class="sr-only" for="forget-id">Viewer ID</label><input id="forget-id" placeholder="Twitch viewer ID" required><button class="button subtle" type="submit">Forget viewer</button></form><div class="privacy-actions"><button class="text-button danger" id="delete-channel" type="button">Delete channel data</button><a class="text-link" href="/notice.html" target="_blank" rel="noopener">Public privacy notice ↗</a></div></details><section class="panel tools"><h2>Stream tools</h2><div><button class="button secondary" id="wrap-button" type="button">Wrap stream</button><button class="button subtle" id="replay-button" type="button">Run demo replay</button><a class="text-link" id="overlay-link" href="#" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" hidden>Open overlay ↗</a><a class="text-link" href="/crew.html" target="_blank" rel="noopener">View crew page ↗</a></div></section></div>
+</main><nav class="main-nav" aria-label="Studio sections"><button id="nav-live" class="nav-button active" type="button" aria-current="page"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg><span>Live</span></button><button id="nav-stickers" class="nav-button" type="button"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="5"/><path d="M8 11h.01M16 11h.01M8 15c1.5 2 6.5 2 8 0"/></svg><span>Stickers</span></button><button id="nav-review" class="nav-button" type="button"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 20h18L12 3Z"/><path d="M12 9v4m0 3h.01"/></svg><span>Review</span><span id="review-count" class="nav-count">0</span></button><button id="nav-awards" class="nav-button" type="button"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21l4-2 4 2v-6H8v6Z"/><circle cx="12" cy="9" r="6"/></svg><span>Awards</span></button><button id="nav-settings" class="nav-button" type="button"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l1.5-1.2-1.6-2.8-1.8.6a7 7 0 0 0-1.7-1L15 4H9l-.3 2.6a7 7 0 0 0-1.7 1l-1.8-.6-1.6 2.8L5.1 11a7 7 0 0 0 0 2l-1.5 1.2 1.6 2.8 1.8-.6a7 7 0 0 0 1.7 1L9 20h6l.3-2.6a7 7 0 0 0 1.7-1l1.8.6 1.6-2.8-1.5-1.2a7 7 0 0 0 .1-1Z"/></svg><span>Settings</span></button></nav></div></body></html>

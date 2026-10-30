@@ -1,0 +1,248 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {once} from 'node:events';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {join,resolve} from 'node:path';
+import {DatabaseSync} from 'node:sqlite';
+
+const root=resolve(import.meta.dirname,'..');
+
+async function startServer(){
+  const dataDir=mkdtempSync(join(root,'server-test-'));
+  const original=new Map(['PORT','REGULARS_DATA_DIR','REGULARS_AI','OPENROUTER_API_KEY','OPENAI_API_KEY','TWITCH_CLIENT_ID','TWITCH_ACCESS_TOKEN','TWITCH_BROADCASTER_ID'].map(key=>[key,process.env[key]]));
+  Object.assign(process.env,{PORT:'0',REGULARS_DATA_DIR:dataDir,REGULARS_AI:'offline',OPENROUTER_API_KEY:'synthetic-test-key',OPENAI_API_KEY:'',TWITCH_CLIENT_ID:'',TWITCH_ACCESS_TOKEN:'',TWITCH_BROADCASTER_ID:''});
+  const {server,app}=await import('../src/server.js');
+  if(!server.listening) await once(server,'listening');
+  for(const [key,value] of original) if(value===undefined) delete process.env[key]; else process.env[key]=value;
+  return {base:`http://127.0.0.1:${server.address().port}`,dataDir,app,stop:async()=>{await new Promise(resolveClose=>server.close(resolveClose));rmSync(dataDir,{recursive:true,force:true});}};
+}
+
+test('local HTTP flow keeps dashboard private and retracts stickers after privacy changes',async()=>{
+  const {base,dataDir,app,stop}=await startServer();
+  const originalFetch=globalThis.fetch;
+  let releaseImage;
+  try{
+    const req=(path,init={})=>fetch(base+path,init);
+    assert.equal((await req('/api/state')).status,401);
+    assert.deepEqual(Object.keys(await (await req('/api/public')).json()).sort(),['awards','stickers']);
+    const page=await req('/');
+    assert.equal(page.status,200);
+    const cookie=page.headers.get('set-cookie')?.split(';')[0];
+    assert.match(cookie,/^regulars_session=[a-f0-9]{64}$/);
+    const get=path=>req(path,{headers:{Cookie:cookie}});
+    const post=(path,input={},origin=base)=>req(path,{method:'POST',headers:{Cookie:cookie,Origin:origin,'Content-Type':'application/json'},body:JSON.stringify(input)});
+    assert.equal((await req('/api/dock/pairing')).status,401);
+    assert.equal((await req('/api/dock/events')).status,401);
+    assert.equal((await req('/api/dock/script')).status,401);
+    const pairing=await (await get('/api/dock/pairing')).json();
+    assert.equal(pairing.endpoint,base+'/api/dock/hotkey');
+    assert.match(pairing.token,/^[a-f0-9]{64}$/);
+    assert.match(await (await get(pairing.scriptUrl)).text(),/obs_hotkey_register_frontend/);
+    const hotkey=(command,extra={})=>req('/api/dock/hotkey',{method:'POST',headers:{Authorization:'Bearer '+pairing.token,'Content-Type':'application/json',...extra},body:JSON.stringify({command})});
+    assert.equal((await post('/api/dock/hotkey',{command:'next_subject'})).status,401);
+    assert.equal((await hotkey('delete_channel')).status,400);
+    assert.equal((await hotkey('next_subject',{Origin:'https://example.com'})).status,403);
+    assert.equal((await hotkey('next_subject',{'Content-Type':'text/plain'})).status,415);
+    assert.equal((await hotkey('next_subject')).status,409);
+    assert.equal((await req('/api/state',{headers:{Authorization:'Bearer '+pairing.token}})).status,401);
+    const eventsController=new AbortController();
+    const events=await req('/api/dock/events',{headers:{Cookie:cookie},signal:eventsController.signal});
+    const reader=events.body.getReader();
+    try{
+      assert.match(new TextDecoder().decode((await reader.read()).value),/event: ready/);
+      const sent=await hotkey('next_subject');assert.equal(sent.status,200);
+      assert.match(new TextDecoder().decode((await reader.read()).value),/"command":"next_subject"/);
+      assert.equal(JSON.stringify(await (await get('/api/state')).json()).includes(pairing.token),false);
+      assert.equal(JSON.stringify(await (await req('/api/public')).json()).includes(pairing.token),false);
+    }finally{eventsController.abort();await reader.cancel().catch(()=>{});}
+    assert.equal((await post('/api/replay',{},'https://example.com')).status,403);
+    assert.equal((await req('/api/overlay?token=wrong')).status,403);
+    assert.equal((await post('/api/replay')).status,202);
+    let state;
+    for(let i=0;i<100;i++){
+      state=await (await get('/api/state')).json();
+      if(!state.replaying && state.session) break;
+      await new Promise(resolveWait=>setTimeout(resolveWait,20));
+    }
+    assert.equal(state.replaying,false);
+    assert.ok(state.messages.length>0);
+    assert.ok(state.presence.some(person=>person.name==='Sam'));
+    assert.ok(state.nudges.length<=3);
+    assert.equal((await req('/api/overlay?token='+new URL(state.overlayUrl).searchParams.get('token'))).status,200);
+
+    const db=new DatabaseSync(join(dataDir,'regulars.sqlite'));
+    try{
+      const returnNudge=db.prepare("SELECT text,status FROM nudges WHERE viewer_id='demo-Rae'").get();
+      assert.match(returnNudge.text,/Rae is back after missing 3 streams/);
+      assert.match(returnNudge.text,/Rae sent a first message/);
+      assert.ok(['open','waiting'].includes(returnNudge.status));
+      const mutedNudge=state.nudges[0];
+      assert.equal((await post(`/api/nudges/${mutedNudge.id}/action`,{action:'mute'})).status,200);
+      assert.equal(db.prepare('SELECT muted FROM viewers WHERE id=?').get(mutedNudge.viewer_id).muted,1);
+      const session=db.prepare('SELECT id FROM sessions WHERE end IS NULL LIMIT 1').get();
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sessions').get().n,7);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM messages').get().n,309);
+      assert.ok(db.prepare('SELECT COUNT(*) AS n FROM first_messages').get().n>0);
+      assert.equal((await post('/api/settings',{timeZone:'Bad/Zone',dayOneDate:'2026-01-01'})).status,400);
+      assert.equal((await post('/api/settings',{timeZone:'America/New_York',dayOneDate:'2026-01-01'})).status,200);
+      assert.deepEqual((await (await get('/api/state')).json()).settings,{timeZone:'America/New_York',dayOneDate:'2026-01-01'});
+      db.prepare('UPDATE sessions SET start=? WHERE id=?').run('2026-01-01T02:00:00.000Z',session.id);
+      db.prepare('INSERT INTO awards (session_id,title,viewer_id,evidence) VALUES (?,?,?,?)').run(session.id,'Test Award','demo-Ana','[]');
+      const publicAward=(await (await req('/api/public')).json()).awards.find(a=>a.title==='Test Award');
+      assert.deepEqual(publicAward.recipients,['Ana']);
+      assert.equal(publicAward.date,'2025-12-31');
+      db.prepare('INSERT INTO viewers (id,name) VALUES (?,?)').run('private-viewer','Private Viewer');
+      db.prepare("INSERT INTO messages (id,session_id,viewer_id,name,timestamp,text,moderation,organizer) VALUES (?,?,?,?,?,?,'cleared','assigned')").run('source-1',session.id,'private-viewer','Private Viewer',new Date().toISOString(),'synthetic source');
+      db.prepare("INSERT INTO messages (id,session_id,viewer_id,name,timestamp,text,moderation,organizer) VALUES (?,?,?,?,?,?,'cleared','assigned')").run('command-source',session.id,'private-viewer','Private Viewer',new Date().toISOString(),'!sticker secret');
+      assert.equal((await post('/api/stickers/generate',{messageIds:['command-source'],subject:'Synthetic'})).status,400);
+      assert.equal((await post('/api/stickers/generate',{messageIds:['history-0-0'],subject:'Synthetic'})).status,400);
+      assert.equal((await post('/api/stickers/generate',{messageIds:['source-1','history-0-0'],subject:'Synthetic'})).status,400);
+      db.prepare('INSERT INTO subjects(id,name,description) VALUES (?,?,?)').run('search-subject','Synthetic','Synthetic subject');
+      db.prepare('UPDATE messages SET timestamp=?,subject_id=? WHERE id=?').run('2030-01-01T12:00:00.000Z','search-subject','source-1');
+      const addContext=db.prepare("INSERT INTO messages(id,session_id,viewer_id,name,timestamp,text,parent_id,moderation,organizer) VALUES (?,?,?,?,?,?,?,'cleared','assigned')");
+      addContext.run('parent-1',session.id,'private-viewer','Private Viewer','2030-01-01T11:59:58.000Z','reply context',null);
+      addContext.run('previous-1',session.id,'private-viewer','Private Viewer','2030-01-01T11:59:59.000Z','previous context',null);
+      addContext.run('related-1',session.id,'private-viewer','Private Viewer','2030-01-01T12:00:10.000Z','related joke','parent-1');
+      const originalScore=app.ai.scoreSubjects,scanned=[];
+      app.ai.scoreSubjects=async({messages,signal})=>{scanned.push(...messages);assert.equal(signal.aborted,false);return messages.map(m=>m.text==='related joke'?0.5:0.1);};
+      try{
+        const ranged=await (await post('/api/stickers/search',{subject:'Synthetic',subjectId:'search-subject',from:'2030-01-01T12:00:00.000Z',to:'2030-01-01T12:00:10.000Z'})).json();
+        assert.deepEqual(scanned.map(m=>m.text).sort(),['related joke','synthetic source']);
+        assert.equal(scanned.find(m=>m.text==='related joke').context.reply,'reply context');
+        assert.equal(scanned.find(m=>m.text==='related joke').context.previousLine,'synthetic source');
+        assert.deepEqual(ranged.selected.map(m=>m.id),['source-1']);
+        assert.deepEqual(ranged.maybe.map(m=>m.id),['related-1']);
+        assert.equal((await post('/api/stickers/search',{subject:'Synthetic',from:'2030-01-02',to:'2030-01-01'})).status,400);
+      }finally{app.ai.scoreSubjects=originalScore;}
+      const found=await (await post('/api/stickers/search',{subject:'Synthetic'})).json();
+      assert.ok(found.selected.some(item=>item.id==='source-1'));
+      db.prepare('INSERT INTO stickers (id,name,subject,brief,image,source_ids,contributor_ids) VALUES (?,?,?,?,?,?,?)').run('sticker-1','Synthetic sticker','Synthetic','private brief','data:image/png;base64,aGVsbG8=','["source-1"]','["private-viewer"]');
+      db.prepare('INSERT INTO stickers (id,name,subject,brief,image,source_ids,contributor_ids) VALUES (?,?,?,?,?,?,?)').run('sticker-invalid','Invalid','Synthetic','private brief','data:image/png;base64,aGVsbG8=','["missing-source"]','["private-viewer"]');
+      db.prepare('INSERT INTO stickers (id,name,subject,brief,image,source_ids,contributor_ids) VALUES (?,?,?,?,?,?,?)').run('sticker-command','Command','Synthetic','private brief','data:image/png;base64,aGVsbG8=','["command-source"]','["private-viewer"]');
+      db.prepare('INSERT INTO stickers (id,name,subject,brief,image,source_ids,contributor_ids) VALUES (?,?,?,?,?,?,?)').run('sticker-cross-session','Mixed','Synthetic','private brief','data:image/png;base64,aGVsbG8=','["source-1","history-0-0"]','["private-viewer","demo-Ana"]');
+      assert.equal((await post('/api/stickers/sticker-invalid/approve')).status,400);
+      assert.equal((await post('/api/stickers/sticker-command/approve')).status,400);
+      assert.equal((await post('/api/stickers/sticker-cross-session/approve')).status,400);
+      assert.equal((await post('/api/stickers/sticker-1/approve')).status,200);
+      const pub=await (await req('/api/public')).json();
+      assert.equal(pub.stickers.length,1);
+      assert.equal(pub.stickers[0].brief,undefined);
+      assert.deepEqual(pub.stickers[0].credits,['Private Viewer']);
+      db.prepare('UPDATE messages SET text=? WHERE id=?').run('!turned-command','source-1');
+      assert.deepEqual((await (await req('/api/public')).json()).stickers,[]);
+      assert.equal((await post('/api/stickers/sticker-1/approve')).status,400);
+      db.prepare('UPDATE messages SET text=? WHERE id=?').run('synthetic source','source-1');
+      const png=Buffer.from('89504e470d0a1a0a','hex').toString('base64');
+      const imageResponse=()=>new Response(JSON.stringify({data:[{b64_json:png,media_type:'image/png'}]}),{status:200,headers:{'Content-Type':'application/json'}});
+      let holdImage=false,prompt='',imageSignal;
+      globalThis.fetch=(url,options)=>{
+        if(String(url)==='https://openrouter.ai/api/v1/images'){
+          prompt=JSON.parse(options.body).prompt;
+          imageSignal=options.signal;
+          if(holdImage) return new Promise(resolveImage=>{releaseImage=()=>resolveImage(imageResponse());});
+          return Promise.resolve(imageResponse());
+        }
+        return originalFetch(url,options);
+      };
+      const briefResponse=await post('/api/stickers/generate',{messageIds:['source-1'],subject:'Synthetic'});
+      assert.equal(briefResponse.status,201);
+      const {id:briefId}=await briefResponse.json();
+      assert.equal((await (await get('/api/state')).json()).stickers.find(s=>s.id===briefId).status,'brief');
+      assert.equal((await post(`/api/stickers/${briefId}/render`,{brief:'Private Viewer cheering with chat'})).status,200);
+      assert.doesNotMatch(prompt,/Private Viewer/);
+      assert.match(prompt,/viewer_\d+/);
+      assert.equal((await (await get('/api/state')).json()).stickers.find(s=>s.id===briefId).status,'preview');
+      assert.equal((await post(`/api/stickers/${briefId}/approve`)).status,200);
+      assert.equal((await post(`/api/stickers/${briefId}/render`)).status,400);
+      const pendingBrief=await (await post('/api/stickers/generate',{messageIds:['source-1'],subject:'Synthetic'})).json();
+      holdImage=true;
+      const pendingRender=post(`/api/stickers/${pendingBrief.id}/render`,{brief:'Private Viewer waving'});
+      for(let i=0;i<100 && !releaseImage;i++) await new Promise(resolveWait=>setTimeout(resolveWait,10));
+      assert.equal(typeof releaseImage,'function');
+      assert.equal((await post(`/api/stickers/${pendingBrief.id}/render`)).status,400);
+      assert.equal((await post('/api/privacy/delete-channel')).status,400);
+      let searchSignal;
+      const priorScore=app.ai.scoreSubjects;
+      app.ai.scoreSubjects=({signal})=>new Promise((_resolve,reject)=>{
+        searchSignal=signal;
+        signal.addEventListener('abort',()=>reject(signal.reason),{once:true});
+      });
+      const canceledSearch=post('/api/stickers/search',{subject:'Synthetic',from:'2030-01-01T12:00:00.000Z',to:'2030-01-01T12:00:10.000Z'});
+      for(let i=0;i<100 && !searchSignal;i++) await new Promise(resolveWait=>setTimeout(resolveWait,5));
+      assert.ok(searchSignal);
+      assert.equal((await post('/api/privacy/forget',{viewerId:'private-viewer'})).status,200);
+      assert.equal(searchSignal.aborted,true);
+      assert.equal((await canceledSearch).status,400);
+      app.ai.scoreSubjects=priorScore;
+      assert.equal(imageSignal.aborted,true);
+      releaseImage();releaseImage=null;
+      assert.equal((await pendingRender).status,400);
+      assert.deepEqual((await (await req('/api/public')).json()).stickers,[]);
+      assert.equal(db.prepare('SELECT id FROM stickers WHERE id=?').get('sticker-1'),undefined);
+      assert.equal((await post('/api/stickers/sticker-1/approve')).status,400);
+      assert.equal(db.prepare('SELECT text FROM messages WHERE id=?').get('source-1'),undefined);
+      const drafted=await (await post('/api/rules/draft',{topic:'Spoilers'})).json();
+      assert.ok(drafted.definition);
+      assert.ok(drafted.positiveExamples.length && drafted.negativeExamples.length);
+      const topicInput={topic:'Spoilers',definition:'Messages about spoilers.',action:'hide',positiveExamples:['The ending is surprising.'],negativeExamples:['Nice stream.']};
+      const sample=await (await post('/api/rules/test',{...topicInput,text:'spoilers in the ending'})).json();
+      assert.ok(sample.score>=0.7);
+      const ruleResponse=await post('/api/rules',topicInput);
+      assert.equal(ruleResponse.status,201);
+      const {id:ruleId}=await ruleResponse.json();
+      const savedRule=db.prepare('SELECT positive_examples,negative_examples FROM rules WHERE id=?').get(ruleId);
+      assert.deepEqual(JSON.parse(savedRule.positive_examples),topicInput.positiveExamples);
+      assert.deepEqual(JSON.parse(savedRule.negative_examples),topicInput.negativeExamples);
+      const priorDraft=app.ai.draftTopic;
+      let draftSignal;
+      app.ai.draftTopic=({signal})=>new Promise((_resolve,reject)=>{
+        draftSignal=signal;signal.addEventListener('abort',()=>reject(signal.reason),{once:true});
+      });
+      const canceledDraft=post('/api/rules/draft',{topic:'Another topic'});
+      for(let i=0;i<100 && !draftSignal;i++) await new Promise(resolveWait=>setTimeout(resolveWait,5));
+      assert.ok(draftSignal);
+      assert.equal((await post(`/api/rules/${ruleId}/delete`)).status,200);
+      assert.equal(draftSignal.aborted,true);
+      assert.equal((await canceledDraft).status,400);
+      app.ai.draftTopic=priorDraft;
+      const priorClassify=app.ai.classify;
+      let testSignal;
+      app.ai.classify=({signal})=>new Promise((_resolve,reject)=>{
+        testSignal=signal;signal.addEventListener('abort',()=>reject(signal.reason),{once:true});
+      });
+      const canceledRuleTest=post('/api/rules/test',{...topicInput,text:'spoilers in chat'});
+      for(let i=0;i<100 && !testSignal;i++) await new Promise(resolveWait=>setTimeout(resolveWait,5));
+      assert.ok(testSignal);
+      assert.equal((await post('/api/rules',topicInput)).status,201);
+      assert.equal(testSignal.aborted,true);
+      assert.equal((await canceledRuleTest).status,400);
+      app.ai.classify=priorClassify;
+      assert.equal((await post('/api/privacy/delete-channel')).status,200);
+      const emptyState=await (await get('/api/state')).json();
+      assert.equal(emptyState.session,null);
+      assert.deepEqual(emptyState.settings,{timeZone:'UTC',dayOneDate:''});
+      assert.deepEqual((await (await req('/api/public')).json()).awards,[]);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM first_messages').get().n,0);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM moderation_actions').get().n,0);
+      db.prepare("INSERT INTO moderation_actions(message_id,sender_id,status) VALUES (?,?,'failed')").run('old-message','old-viewer');
+      assert.equal((await post('/api/replay')).status,400);
+      db.prepare('DELETE FROM moderation_actions').run();
+      db.prepare('INSERT INTO first_messages(session_id,viewer_id,message_id) VALUES (?,?,?)').run('old-session','old-viewer','old-message');
+      assert.equal((await post('/api/replay')).status,400);
+      db.prepare('DELETE FROM first_messages').run();
+      db.prepare('INSERT INTO viewers (id,name) VALUES (?,?)').run('existing','Existing');
+      assert.equal((await post('/api/replay')).status,400);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sessions').get().n,0);
+      db.prepare('DELETE FROM viewers WHERE id=?').run('existing');
+      db.prepare('INSERT INTO settings(key,value) VALUES (?,?)').run('unknownExistingSetting','value');
+      assert.equal((await post('/api/replay')).status,400);
+      db.prepare('DELETE FROM settings WHERE key=?').run('unknownExistingSetting');
+      assert.equal((await post('/api/settings',{timeZone:'America/New_York'})).status,200);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM first_messages').get().n,0);
+      assert.equal((await post('/api/replay')).status,202);
+      for(let i=0;i<100 && (await (await get('/api/state')).json()).replaying;i++) await new Promise(resolveWait=>setTimeout(resolveWait,10));
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sessions').get().n,7);
+      assert.equal((await (await get('/api/state')).json()).settings.timeZone,'America/New_York');
+    }finally{db.close();}
+  }finally{releaseImage?.();globalThis.fetch=originalFetch;await stop();}
+});
