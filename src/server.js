@@ -206,7 +206,7 @@ async function renderSticker(id,input){
 }
 
 const types={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8'};
-const staticFiles=new Set(['index.html','app.js','style.css','overlay.html','overlay.js','crew.html','public.js','notice.html']);
+const staticFiles=new Set(['index.html','app.js','style.css','appearance.css','overlay.html','overlay.js','crew.html','public.js','notice.html']);
 const server=http.createServer(async(req,res)=>{
   try{
     const host=req.headers.host || '';if(!/^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(host)) return json(res,403,{error:'Invalid host.'});

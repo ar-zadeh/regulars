@@ -27,6 +27,11 @@ test('local HTTP flow keeps dashboard private and retracts stickers after privac
     assert.deepEqual(Object.keys(await (await req('/api/public')).json()).sort(),['awards','stickers']);
     const page=await req('/');
     assert.equal(page.status,200);
+    assert.match(await page.text(), /href="\/appearance\.css"/);
+    const appearance=await req('/appearance.css');
+    assert.equal(appearance.status,200);
+    assert.match(appearance.headers.get('content-type'), /text\/css/);
+    assert.match(await appearance.text(), /prefers-color-scheme: dark/);
     const cookie=page.headers.get('set-cookie')?.split(';')[0];
     assert.match(cookie,/^regulars_session=[a-f0-9]{64}$/);
     const get=path=>req(path,{headers:{Cookie:cookie}});
