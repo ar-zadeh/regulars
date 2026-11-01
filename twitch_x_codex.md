@@ -515,10 +515,11 @@ joke), never the game, the stream, or a broad theme: "New microphone", not
    (0.3 by default), and retain those existing subjects as competitors in
    discovery and lookback. Different aspects of one specific subject, such as
    new hair colour and its matching profile picture, still belong together.
-3. The best subject at 0.7 or above is primary. If two subjects both reach 0.7,
-   the message is **uncertain** unless it is a reply, in which case it takes
-   the reply parent's subject. A best of 0.3–0.7 is also uncertain (a sticker
-   "maybe"). If all are below 0.3, or there are no subjects yet, the message
+3. The best subject at 0.7 or above is primary if no other subject reaches 0.7,
+   or if it leads the next qualifying score by at least 0.1. Closer high-score
+   ties stay **uncertain** unless the reply parent's subject resolves the tie.
+   A best score from 0.3 to below 0.7 is also uncertain (a sticker "maybe").
+   If all are below 0.3, or there are no subjects yet, the message
    joins the **New pool**. Uncertain messages also participate in discovery:
    a weak match to an existing subject must not prevent a new topic forming.
 4. A message leaves the pool once it is at least 15 seconds old and 20 newer
@@ -558,9 +559,10 @@ joke), never the game, the stream, or a broad theme: "New microphone", not
    labels, abort on revision changes, and clear labels when text is removed
    or expires. Labels never appear in the public overlay or awards.
 6. When a subject is registered, run a **lookback**: Jev checks it against the
-   messages from the last 5 minutes that have no primary subject, and matches
-   at 0.7 or above join with their original timestamps. Someone whose opening
-   message already left the pool still counts first for Hype Engine. At Wrap,
+   messages from the last 5 minutes that have no primary subject. Matches
+   that win the same competing-score check join with their original timestamps.
+   Someone whose opening message already left the pool still counts first
+   for Hype Engine. At Wrap,
    run any final naming pass and its dependent lookback within the shared
    5-second processing deadline, using only messages received before the
    cutoff. Naming may also consider recent assignments with confidence below
