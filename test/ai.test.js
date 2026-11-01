@@ -58,6 +58,29 @@ test('existing conversation comparison sanitizes proposals and validates the sel
   assert.equal(await createAI({offline:true}).existingSubject({existing:[{id:'boss'}]}),null);
 });
 
+test('naming maps an existing index to its ID and treats a new topic separately',async()=>{
+  let payload;
+  const ai=createAI({apiKey:'test',textGenerator:async input=>{
+    payload=JSON.parse(input.messages[1].content);
+    return JSON.stringify([{name:'Lighting setup',description:'Lamp position and brightness.',existingIndex:0},
+      {name:'Camera focus',description:'Autofocus hunting.',existingIndex:null}]);
+  }});
+  const result=await ai.nameSubjects({messages:['Dim the lamp','Move it closer'],existing:[{id:'lamp',name:'Lamp brightness'}]});
+  assert.equal(payload.existing[0].index,0);
+  assert.equal(result[0].existingId,'lamp');
+  assert.equal(result[1].existingId,null);
+});
+
+test('matching carries a sanitized about label as context',async()=>{
+  let payload;
+  const ai=createAI({apiKey:'test',fetchImpl:async(_url,options)=>{
+    payload=JSON.parse(options.body);return response({answers:{relevance:{noul:0.1}}});
+  }});
+  await ai.scoreSubject({text:'sounds like that playlist',context:{about:'Alice playlist'},identities:['Alice'],subject:{name:'Farm layout'}});
+  assert.equal(payload.state.about,'viewer_1 playlist');
+  assert.doesNotMatch(JSON.stringify(payload),/Alice/);
+});
+
 test('sanitizer consistently masks known aliases, IDs, and mentions', () => {
   const sanitize = createSanitizer([{ login: 'alice', displayName: 'Alice_Star', id: '12345' }]);
   assert.equal(sanitize('@alice and Alice_Star (12345) saw @Bob'),

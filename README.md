@@ -56,8 +56,9 @@ topic discovery and stay out of the topic reader, including Ungrouped. Messages
 with text alongside emojis still participate; reaction-only messages remain in
 the retained chat history.
 Naming can revisit recent assignments with weak confidence or narrow margins,
-and broaden an existing topic while preserving its ID. Discovery also revisits
-recent assignments when a new topic appears or an existing topic changes. Moving an
+and explicitly reuse an existing topic while broadening its name or description.
+Matching also receives a message's existing about label as context. Discovery
+revisits recent assignments when a topic appears or changes. Moving an
 already grouped message requires both a strong relevance score and a direct JEV
 comparison with its previous topic. Messages classified during discovery are
 rechecked against any topic that appeared while their request was in flight.

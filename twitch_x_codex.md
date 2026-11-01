@@ -508,7 +508,8 @@ joke), never the game, the stream, or a broad theme: "New microphone", not
    latest 2 lines, so Jev compares the message directly with that conversation.
    Each message also carries its reply and up to 8 preceding eligible chat
    lines from the last 2 minutes, in chronological order, to resolve short
-   follow-ups. Use this context in discovery and lookback checks too.
+   follow-ups. Use this context in discovery and lookback checks too, including
+   an existing about label as a subject hint when it agrees with the message.
    The `false` criterion is "a different point, or only the same game or stream
    in general". Store probabilities at or above the configured maybe threshold
    (0.3 by default), and retain those existing subjects as competitors in
@@ -528,7 +529,9 @@ joke), never the game, the stream, or a broad theme: "New microphone", not
    pass, run a naming pass: one at a time, at most every 10 s. The LLM sees the
    newest 60 pool messages in chronological order (text only, no usernames) and the current subject
    names, and proposes up to 3 subjects, each either new (a name and a
-   one-sentence description) or an existing one. Jev checks each pool message
+   one-sentence description) or an existing one identified by its supplied
+   index. Another aspect of the same event reuses that index and broadens the
+   existing name and description. Jev checks each pool message
    against each proposal with the step-2 Noul, in bounded batches. A new
    proposal is registered only if 3 messages confidently belong to it. One
    viewer can start a subject with 3 distinct lines; repeating one line does

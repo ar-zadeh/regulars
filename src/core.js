@@ -384,7 +384,7 @@ export class Regulars {
     const parent=message.parent_id ? this.one("SELECT text,subject_id FROM messages WHERE id=? AND session_id=? AND rowid<=? AND moderation='cleared' AND text IS NOT NULL",message.parent_id,message.session_id,before) : null;
     const since=new Date(ms(message.timestamp)-120000).toISOString();
     const recent=this.all("SELECT text,viewer_id FROM messages WHERE session_id=? AND rowid<=? AND timestamp>=? AND timestamp<=? AND moderation='cleared' AND bot=0 AND addresses_ai=0 AND organizer<>'reaction' AND text IS NOT NULL ORDER BY timestamp DESC,rowid DESC LIMIT 8",message.session_id,before,since,message.timestamp).filter(m=>!isEmojiOnly(m.text));
-    return {reply:parent?.text?.slice(0,500),replySubject:parent?.subject_id ? this.one('SELECT name FROM subjects WHERE id=?',parent.subject_id)?.name : '',
+    return {about:message.about || '',reply:parent?.text?.slice(0,500),replySubject:parent?.subject_id ? this.one('SELECT name FROM subjects WHERE id=?',parent.subject_id)?.name : '',
       previousLine:recent.find(m=>m.viewer_id===message.viewer_id)?.text.slice(0,500),recentMessages:recent.reverse().map(m=>m.text.slice(0,300))};
   }
   async scoreConversation(messages,subject,identities,signal,maxRowid){
@@ -438,9 +438,10 @@ export class Regulars {
         const key=subjectKey(proposal.name);if(seen.has(key))continue;seen.add(key);
         if(!await this.safeGeneratedText(`${proposal.name}. ${proposal.description}`,identities,controller.signal) || revision!==this.revision) continue;
         const available=[...candidates.map(c=>c.subject),...existing];
-        let known=available.find(s=>subjectKey(s.name)===key);
-        if(!known && available.length && this.ai.existingSubject){
-          const id=await this.ai.existingSubject({subject:proposal,existing:available,identities,signal:controller.signal});
+        let known=existing.find(s=>s.id===proposal.existingId) || available.find(s=>subjectKey(s.name)===key);
+        const alternatives=proposal.existingId===undefined ? available : candidates.map(c=>c.subject);
+        if(!known && alternatives.length && this.ai.existingSubject){
+          const id=await this.ai.existingSubject({subject:proposal,existing:alternatives,identities,signal:controller.signal});
           if(revision!==this.revision)return;
           known=available.find(s=>s.id===id);
         }

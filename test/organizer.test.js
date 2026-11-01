@@ -137,6 +137,18 @@ test('broadening an existing topic rechecks recent assignments without creating 
   assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE subject_id='light'").n,3);
 });
 
+test('an explicit naming reference broadens the existing topic even when names differ',async t=>{
+  const {app,send}=setup(t,{
+    nameSubjects:async()=>[{name:'Lighting setup',description:'Light placement, brightness and warmth.',existingId:'light'}],
+    existingSubject:async()=>{throw new Error('Explicit reuse should not need another comparison');},scoreSubject:async()=>0.95,
+  });
+  app.run("INSERT INTO subjects (id,name,description) VALUES ('light','Lamp brightness','A bright lamp.')");
+  for(let i=0;i<3;i++)await send(String(i),`light detail ${i}`,i);
+  await app.discover();
+  assert.equal(app.one('SELECT COUNT(*) AS n FROM subjects').n,1);
+  assert.equal(app.one("SELECT name FROM subjects WHERE id='light'").name,'Lighting setup');
+});
+
 test('emoji-only messages need no topic model calls while a text reaction with emojis participates',async t=>{
   const requests=[];
   const model=createAI({apiKey:'test',fetchImpl:async(_url,options)=>{
