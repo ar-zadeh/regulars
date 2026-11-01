@@ -55,11 +55,13 @@ create topics. Unicode emoji-only messages and Twitch emote-only messages skip
 topic discovery and stay out of the topic reader, including Ungrouped. Messages
 with text alongside emojis still participate; reaction-only messages remain in
 the retained chat history.
-Discovery also revisits recent assignments when a new topic appears. Moving an
+Naming can revisit recent assignments with weak confidence or narrow margins,
+and broaden an existing topic while preserving its ID. Discovery also revisits
+recent assignments when a new topic appears or an existing topic changes. Moving an
 already grouped message requires both a strong relevance score and a direct JEV
 comparison with its previous topic. Messages classified during discovery are
 rechecked against any topic that appeared while their request was in flight.
-Each community name includes a reason: **Question**, **Returned**, **First chat**,
+Each community name includes a reason: **Needs answer**, **Returned**, **First chat**,
 **Say hi**, or **Regular**. **Regular** means a known regular is present without
 a pending reminder. Community cues are private to the streamer.
 

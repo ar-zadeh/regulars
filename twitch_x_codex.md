@@ -555,7 +555,13 @@ joke), never the game, the stream, or a broad theme: "New microphone", not
    message already left the pool still counts first for Hype Engine. At Wrap,
    run any final naming pass and its dependent lookback within the shared
    5-second processing deadline, using only messages received before the
-   cutoff. If that work is unfinished, apply the incomplete-awards behavior in
+   cutoff. Naming may also consider recent assignments with confidence below
+   0.9 or a competing score within 0.2, within the same 60-message input bound.
+   These assignments can support a new topic only after a direct Jev comparison
+   confirms the move. Reuse existing IDs for renamed or broader descriptions,
+   then recheck recent assignments against the updated topic. Moving a grouped
+   message requires strong relevance and direct comparison with its old topic.
+   If that work is unfinished, apply the incomplete-awards behavior in
    §3; a late naming result cannot rewrite an already saved card.
 7. Compute discussions in code from primary assignments plus uncertain replies
    to them. Sort by time and split at gaps over 60 s. Opinions from two or more

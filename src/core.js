@@ -15,7 +15,7 @@ const chooseSubject = (scores,threshold,parentId) => {
   const high=scores.filter(s=>s.score>=threshold).sort((a,b)=>b.score-a.score);
   // Independent relevance questions can both pass. Require a clear lead;
   // otherwise only an explicit reply can resolve the tie.
-  if(high.length===1 || (high.length>1 && high[0].score-high[1].score>=0.1))return high[0];
+  if(high.length===1 || (high.length>1 && high[0].score-high[1].score>=0.1-1e-9))return high[0];
   return high.find(s=>s.id===parentId);
 };
 export function repeatKey(text, parent = '') {
@@ -414,7 +414,15 @@ export class Regulars {
       const newer=this.one("SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND rowid>? AND rowid<=?",session.id,message.rowid,maxRowid).n;
       if(age>=subjectWindowMs || (age>=15000 && newer>=20)) this.run("UPDATE messages SET organizer='unassigned' WHERE id=? AND organizer IN ('new','uncertain')",message.id);
     }
-    const pool=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND moderation='cleared' AND organizer IN ('new','uncertain') AND addresses_ai=0 AND text IS NOT NULL ORDER BY timestamp DESC,rowid DESC LIMIT 60",session.id,maxRowid).filter(isTopicMessage).reverse();
+    const fresh=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND moderation='cleared' AND organizer IN ('new','uncertain') AND addresses_ai=0 AND text IS NOT NULL ORDER BY timestamp DESC,rowid DESC LIMIT 60",session.id,maxRowid).filter(isTopicMessage);
+    const earliest=new Date(this.now()-subjectWindowMs).toISOString();
+    // A weak early assignment must not hide a new conversation from naming.
+    // Keep the normal pool first, and bound reconsideration to recent lines.
+    const weak=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND COALESCE(received_at,timestamp)>=? AND moderation='cleared' AND organizer='assigned' AND addresses_ai=0 AND text IS NOT NULL ORDER BY timestamp DESC,rowid DESC LIMIT 60",session.id,maxRowid,earliest).filter(isTopicMessage).filter(m=>{
+      const scores=JSON.parse(m.subject_scores || '[]'),primary=scores.find(s=>s.id===m.subject_id);
+      return scores.length && (!primary || primary.score<0.9 || scores.some(s=>s.id!==m.subject_id && primary.score-s.score<0.2));
+    });
+    const pool=[...fresh,...weak.slice(0,Math.max(0,60-fresh.length))].sort((a,b)=>ms(a.timestamp)-ms(b.timestamp) || a.rowid-b.rowid);
     if(!conversationEvidence(pool)) return;
     if(!force && (pool.every(m=>this.lastNamedMessageIds.has(m.id)) || this.now()-this.lastNamingAt<10000)) return;
     this.lastNamingAt=this.now();
@@ -437,7 +445,7 @@ export class Regulars {
           known=available.find(s=>s.id===id);
         }
         if(known && candidates.some(c=>c.subject.id===known.id))continue;
-        const subject=known || {id:randomUUID(),name:proposal.name.trim().slice(0,100),description:proposal.description.trim().slice(0,300)};
+        const subject={...known,id:known?.id || randomUUID(),name:known && subjectKey(known.name)===key ? known.name : proposal.name.trim().slice(0,100),description:proposal.description.trim().slice(0,300)};
         const scores=await this.scoreConversation(pool,subject,identities,controller.signal,maxRowid);
         if(revision!==this.revision) return;
         candidates.push({subject,known,scores});
@@ -456,17 +464,27 @@ export class Regulars {
         return {m,candidate:selected?.candidate};
       });
       const selected=assignments(pool,candidates),registered=[];
+      for(const item of selected){
+        if(!item.m.subject_id || !item.candidate || item.m.subject_id===item.candidate.subject.id)continue;
+        const original=existing.find(s=>s.id===item.m.subject_id);
+        const choice=this.ai.chooseSubject && await this.ai.chooseSubject({text:item.m.text,context:this.messageContext(item.m,maxRowid),subjects:[original,item.candidate.subject],identities,signal:controller.signal});
+        if(revision!==this.revision)return;
+        if(choice!==item.candidate.subject.id)item.candidate=undefined;
+      }
       for(const candidate of candidates){
         const matches=selected.filter(item=>item.candidate===candidate).map(item=>item.m);
         if(!matches.length || (!candidate.known && !conversationEvidence(matches))) continue;
         const {subject}=candidate;
         if(!candidate.known) this.run('INSERT INTO subjects (id,name,description) VALUES (?,?,?)',subject.id,subject.name,subject.description);
+        else this.run('UPDATE subjects SET name=?,description=? WHERE id=?',subject.name,subject.description,subject.id);
         registered.push(candidate);
-        for(const m of matches) this.run("UPDATE messages SET organizer='assigned',subject_id=? WHERE id=? AND moderation='cleared' AND organizer IN ('new','uncertain')",subject.id,m.id);
-        this.run("UPDATE subjects SET last_active=(SELECT MAX(timestamp) FROM messages WHERE subject_id=? AND moderation='cleared') WHERE id=?",subject.id,subject.id);
+        for(const m of matches){
+          if(m.subject_id && m.subject_id!==subject.id)this.run("UPDATE messages SET subject_id=? WHERE id=? AND moderation='cleared' AND subject_id=?",subject.id,m.id,m.subject_id);
+          else this.run("UPDATE messages SET organizer='assigned',subject_id=? WHERE id=? AND moderation='cleared' AND organizer IN ('new','uncertain')",subject.id,m.id);
+        }
+        for(const id of new Set([subject.id,...matches.map(m=>m.subject_id).filter(Boolean)]))this.run("UPDATE subjects SET last_active=(SELECT MAX(timestamp) FROM messages WHERE subject_id=? AND moderation='cleared') WHERE id=?",id,id);
       }
       if(registered.length){
-        const earliest=new Date(this.now()-subjectWindowMs).toISOString();
         const lookback=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND COALESCE(received_at,timestamp)>=? AND moderation='cleared' AND organizer IN ('new','unassigned','uncertain') AND addresses_ai=0 AND text IS NOT NULL ORDER BY timestamp,rowid",session.id,maxRowid,earliest).filter(isTopicMessage);
         const checked=[];
         for(const candidate of candidates){
@@ -475,15 +493,15 @@ export class Regulars {
         }
         for(const {m,candidate} of assignments(lookback,checked)) if(candidate && registered.some(c=>c.subject.id===candidate.subject.id)) this.run("UPDATE messages SET organizer='assigned',subject_id=? WHERE id=? AND moderation='cleared' AND text IS NOT NULL AND organizer IN ('new','unassigned','uncertain')",candidate.subject.id,m.id);
         for(const {subject} of registered) this.run("UPDATE subjects SET last_active=(SELECT MAX(timestamp) FROM messages WHERE subject_id=? AND moderation='cleared') WHERE id=?",subject.id,subject.id);
-        // Before a conversation had a name, some of its messages may have been
-        // assigned to an older topic. Revisit at most 60 recent assignments,
+        // A new or broadened conversation may reclaim earlier assignments.
+        // Revisit at most 60 recent assignments,
         // requiring both strong relevance and a direct JEV comparison to move.
-        const newTopics=registered.filter(candidate=>!candidate.known);
-        if(newTopics.length && this.ai.chooseSubject){
+        const changedTopics=registered.filter(candidate=>!candidate.known || candidate.subject.name!==candidate.known.name || candidate.subject.description!==candidate.known.description);
+        if(changedTopics.length && this.ai.chooseSubject){
           const assigned=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND COALESCE(received_at,timestamp)>=? AND moderation='cleared' AND organizer='assigned' AND addresses_ai=0 AND text IS NOT NULL ORDER BY timestamp DESC,rowid DESC LIMIT 60",session.id,maxRowid,earliest).filter(isTopicMessage).reverse();
-          const competitors=assigned.filter(m=>!newTopics.some(c=>c.subject.id===m.subject_id));
+          const competitors=assigned.filter(m=>!changedTopics.some(c=>c.subject.id===m.subject_id));
           const rescored=[];
-          for(const candidate of newTopics){
+          for(const candidate of changedTopics){
             rescored.push({...candidate,scores:await this.scoreConversation(competitors,candidate.subject,identities,controller.signal,maxRowid)});
             if(revision!==this.revision)return;
           }

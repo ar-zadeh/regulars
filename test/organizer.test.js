@@ -71,6 +71,13 @@ test('a close tie with an unregistered proposal stays ungrouped',async t=>{
   assert.equal(app.one('SELECT COUNT(*) AS n FROM subjects').n,1);
 });
 
+test('a ten-point confidence lead is not lost to floating-point rounding',async t=>{
+  const {app,send}=setup(t,{classify:async()=>({category:'question',addressesAI:0,topics:[],subjects:[{id:'focus',score:0.9},{id:'light',score:0.8}]})});
+  app.run("INSERT INTO subjects (id,name,description) VALUES ('focus','Camera focus','Autofocus hunting.'),('light','Lamp brightness','A bright lamp.')");
+  await send('m','Focus is hunting again',0);
+  assert.equal(app.one("SELECT subject_id FROM messages WHERE id='m'").subject_id,'focus');
+});
+
 test('a renamed aspect of an existing conversation reuses its ID without a duplicate',async t=>{
   const {app,send}=setup(t,{
     nameSubjects:async()=>[{name:'Boss victory',description:'Defeating the boss after many attempts.'}],
@@ -82,6 +89,52 @@ test('a renamed aspect of an existing conversation reuses its ID without a dupli
   await app.discover();
   assert.equal(app.one('SELECT COUNT(*) AS n FROM subjects').n,1);
   assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE subject_id='boss'").n,3);
+});
+
+test('recent weak assignments can seed a distinct conversation after direct comparison',async t=>{
+  const inputs=[];
+  const {app,send}=setup(t,{
+    classify:async()=>({category:'question',addressesAI:0,topics:[],subjects:[{id:'focus',score:0.76}]}),
+    nameSubjects:async({messages})=>{inputs.push(messages);return [{name:'Key light',description:'Light brightness and warmth.'}];},
+    scoreSubject:async()=>0.95,
+    chooseSubject:async({subjects})=>subjects.find(s=>s.name==='Key light').id,
+  });
+  app.run("INSERT INTO subjects (id,name,description) VALUES ('focus','Camera focus','Autofocus hunting.')");
+  for(let i=0;i<3;i++)await send(String(i),`light detail ${i}`,i);
+  assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE subject_id='focus'").n,3);
+  await app.discover();
+  assert.deepEqual(inputs[0],['light detail 0','light detail 1','light detail 2']);
+  const light=app.one("SELECT id FROM subjects WHERE name='Key light'").id;
+  assert.equal(app.one('SELECT COUNT(*) AS n FROM messages WHERE subject_id=?',light).n,3);
+  assert.equal(app.one("SELECT last_active FROM subjects WHERE id='focus'").last_active,null);
+});
+
+test('assigned evidence cannot register a new topic when direct comparison rejects the move',async t=>{
+  const {app,send}=setup(t,{
+    classify:async()=>({category:'question',addressesAI:0,topics:[],subjects:[{id:'focus',score:0.76}]}),
+    nameSubjects:async()=>[{name:'Key light',description:'Light brightness and warmth.'}],scoreSubject:async()=>0.95,
+    chooseSubject:async()=> 'focus',
+  });
+  app.run("INSERT INTO subjects (id,name,description) VALUES ('focus','Camera focus','Autofocus hunting.')");
+  for(let i=0;i<3;i++)await send(String(i),`light detail ${i}`,i);
+  await app.discover();
+  assert.equal(app.one('SELECT COUNT(*) AS n FROM subjects').n,1);
+  assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE subject_id='focus'").n,3);
+});
+
+test('broadening an existing topic rechecks recent assignments without creating a duplicate',async t=>{
+  const {app,send}=setup(t,{
+    classify:async()=>({category:'question',addressesAI:0,topics:[],subjects:[{id:'focus',score:0.76},{id:'light',score:0.4}]}),
+    nameSubjects:async()=>[{name:'Lighting setup',description:'Light placement, brightness and warmth.'}],
+    existingSubject:async()=> 'light',scoreSubject:async()=>0.95,
+    chooseSubject:async()=> 'light',
+  });
+  app.run("INSERT INTO subjects (id,name,description) VALUES ('focus','Camera focus','Autofocus hunting.'),('light','Lamp brightness','A bright lamp.')");
+  for(let i=0;i<3;i++)await send(String(i),`light detail ${i}`,i);
+  await app.discover();
+  assert.equal(app.one('SELECT COUNT(*) AS n FROM subjects').n,2);
+  assert.equal(app.one("SELECT name FROM subjects WHERE id='light'").name,'Lighting setup');
+  assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE subject_id='light'").n,3);
 });
 
 test('emoji-only messages need no topic model calls while a text reaction with emojis participates',async t=>{
