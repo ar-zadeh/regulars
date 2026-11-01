@@ -4,7 +4,7 @@ import {mkdtempSync,rmSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createAI} from '../src/ai.js';
-import {lockEvaluation,budgetedJevFetch,groupingMetrics} from '../scripts/topic-eval-support.js';
+import {lockEvaluation,budgetedJevFetch,groupingMetrics,highestPricing} from '../scripts/topic-eval-support.js';
 import {twitchChats} from './fixtures/twitch-chats.js';
 
 test('external Luna naming preserves sanitization and never calls OpenRouter',async()=>{
@@ -42,6 +42,37 @@ test('evaluation lock prevents two processes from independently spending the sam
   const next=lockEvaluation(root);next();
 });
 
+test('opt-in Luna uses the highest price tiers, reserves max_tokens, and records actual usage',async t=>{
+  const root=mkdtempSync(join(tmpdir(),'regulars-luna-budget-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const lunaPricing=highestPricing([{pricing:{prompt:'0.000001',completion:'0.000002',overrides:[{prompt:'0.000003',completion:'0.000004'}]}},
+    {pricing:{prompt:'0.000002',completion:'0.000003'}}]);
+  assert.deepEqual(lunaPricing,{prompt:0.000003,completion:0.000004,request:0});
+  let release,calls=0;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const metadata={budgetUsd:0.009,contextLength:1000,pricing:{prompt:0,completion:0},lunaPricing};
+  const guarded=budgetedJevFetch(metadata,{root,luna:true,fetchImpl:async()=>{calls++;await gate;return new Response(JSON.stringify({usage:{prompt_tokens:100,completion_tokens:20,cost:0.0002}}));}});
+  const body={model:'openai/gpt-6-luna',messages:[{role:'user',content:'Label tea'}],max_tokens:1000};
+  const request={method:'POST',body:JSON.stringify(body)},url='https://openrouter.ai/api/v1/chat/completions';
+  const first=guarded(url,request);
+  const reservation=(Buffer.byteLength(request.body)+256)*lunaPricing.prompt+1000*lunaPricing.completion;
+  assert.equal(guarded.summary().chargedOrReservedUsd,reservation);
+  await assert.rejects(guarded(url,request),/budget exhausted/);
+  release();await first;
+  assert.equal(calls,1);assert.equal(guarded.summary().reportedUsd,0.0002);
+  const restarted=budgetedJevFetch(metadata,{root,luna:true});
+  assert.equal(restarted.summary().reportedUsd,0.0002);
+  await assert.rejects(guarded(url,{method:'POST',body:JSON.stringify({...body,max_tokens:undefined})}),/Invalid Luna/);
+  await assert.rejects(guarded(url,{method:'POST',body:JSON.stringify({...body,model:'another-model'})}),/only JEV/);
+});
+
+test('evaluation cap never exceeds two dollars even with older metadata',t=>{
+  const root=mkdtempSync(join(tmpdir(),'regulars-budget-cap-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const guarded=budgetedJevFetch({budgetUsd:5},{root});
+  assert.equal(guarded.summary().budgetUsd,2);
+  assert.throws(()=>highestPricing([{pricing:{prompt:'-1',completion:'0'}}]),/Invalid/);
+  assert.throws(()=>highestPricing([]),/Invalid/);
+});
+
 test('grouping metrics penalize both merged topics and duplicate splits',()=>{
   const merged=groupingMetrics([{expected:'a',subjectId:'one'},{expected:'a',subjectId:'one'},{expected:'b',subjectId:'one'},{expected:'b',subjectId:'one'}]);
   assert.equal(merged.accuracy,0.5);assert.equal(merged.pairPrecision,1/3);
@@ -50,7 +81,7 @@ test('grouping metrics penalize both merged topics and duplicate splits',()=>{
 });
 
 test('chat fixtures have chronological arrivals and enough evidence per topic',()=>{
-  assert.equal(twitchChats.length,11);assert.equal(twitchChats.filter(s=>s.split==='holdout').length,5);
+  assert.equal(twitchChats.length,15);assert.equal(twitchChats.filter(s=>s.split==='holdout').length,5);
   for(const s of twitchChats){
     assert.ok(s.messages.every((m,i)=>i===0 || m.at>=s.messages[i-1].at));
     for(const topic of new Set(s.messages.map(m=>m.expected).filter(Boolean)))assert.ok(s.messages.filter(m=>m.expected===topic).length>=3);

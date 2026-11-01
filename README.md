@@ -234,7 +234,7 @@ print the key.
 
 ### Timed topic quality evaluation
 
-`test/fixtures/twitch-chats.js` contains eleven independent, labeled synthetic
+`test/fixtures/twitch-chats.js` contains fifteen independent, labeled synthetic
 streams covering quiet chat, bursts, topic changes, replies, one viewer,
 multilingual messages, and injected instructions. Labels remain in the evaluator;
 the models receive only chat that has already arrived. Arrivals run at 1× and
@@ -244,20 +244,27 @@ continue while model requests are pending.
 node scripts/evaluate-topics.js --split all --run my-check
 ```
 
-This evaluation needs a Codex Luna naming worker. It writes the exact naming
-prompt and sanitized input into `data/evals/topic-quality/luna/pending/<id>.json`.
+By default, this evaluation needs a Codex Luna naming and labelling worker. It
+writes each prompt and sanitized input into
+`data/evals/topic-quality/luna/pending/<id>.json`.
 The worker answers each request with just the requested JSON array, atomically
 saved to `luna/responses/<id>.json`, without reading fixtures, labels, or results.
 Identical prompts reuse their cached response. Missing responses time out; naming
 never falls back to OpenRouter. The normal app's configured generation provider
 is unchanged by this evaluation adapter.
 
-Only JEV requests reach OpenRouter through this runner. Its persistent ledger
-reserves the cost of outstanding calls and enforces a cumulative $5 limit across
-runs. A process lock prevents simultaneous evaluations from sharing that budget
+Add `--luna openrouter` to use the real Luna model for naming and labels.
+Without this flag, only JEV requests can reach OpenRouter. The persistent ledger
+reserves outstanding calls and enforces a cumulative $2 limit across runs.
+Luna reservations use each request's `max_tokens` and the highest published
+provider prices, including price tiers; completed calls record reported usage.
+A process lock prevents simultaneous evaluations from sharing that budget
 incorrectly. Do not remove the ledger to continue the same budgeted evaluation.
-Reports, per-message results, discovery timings, and spend are saved locally under
-`data/evals/topic-quality/<run>/`. `--split dev` and `--cases solo,replies` can
+Reports include final topics, about labels, and a review list of every visible
+ungrouped message, including two-message subjects tagged `thin` in the fixtures.
+These tags are never sent to either model. Results, discovery timings, and spend
+are saved locally under `data/evals/topic-quality/<run>/`. `--split dev` and
+`--cases solo,replies` can
 select a smaller run. `--cases multitopic` selects the chat with five interleaved
 subjects. Four of the original ten scenarios initially formed a holdout set;
 once used to guide changes, they should be treated as regression cases.

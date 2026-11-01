@@ -28,13 +28,18 @@ export function writeJson(file,data){
   writeFileSync(`${file}.tmp`,JSON.stringify(data,null,2)+'\n',{mode:0o600});
   renameSync(`${file}.tmp`,file);
 }
-export async function prepareBudget(apiKey,{fetchImpl=fetch,root=EVAL_ROOT}={}){
+export function highestPricing(endpoints){
+  const prices=endpoints.flatMap(endpoint=>[endpoint.pricing,...(endpoint.pricing?.overrides || [])]);
+  if(!prices.length || prices.some(p=>!p || ['prompt','completion','request'].some(key=>!Number.isFinite(Number(p[key] ?? (key==='request'?0:NaN))) || Number(p[key] || 0)<0)))throw new Error('Invalid model pricing');
+  return Object.fromEntries(['prompt','completion','request'].map(key=>[key,Math.max(...prices.map(p=>Number(p[key] || 0)))]));
+}
+export async function prepareBudget(apiKey,{fetchImpl=fetch,root=EVAL_ROOT,luna=false}={}){
   mkdirSync(root,{recursive:true,mode:0o700});
   const file=join(root,'budget-metadata.json');
-  if(existsSync(file))return JSON.parse(readFileSync(file,'utf8'));
-  const [keyResponse,modelsResponse]=await Promise.all([
+  const [keyResponse,modelsResponse,lunaResponse]=await Promise.all([
     fetchImpl('https://openrouter.ai/api/v1/key',{headers:{Authorization:`Bearer ${apiKey}`}}),
     fetchImpl('https://openrouter.ai/api/v1/models/typesafe/jev-1.14/endpoints'),
+    luna?fetchImpl('https://openrouter.ai/api/v1/models/openai/gpt-6-luna/endpoints'):null,
   ]);
   if(!keyResponse.ok || !modelsResponse.ok)throw new Error(`Budget metadata unavailable (${keyResponse.status}/${modelsResponse.status})`);
   const account=(await keyResponse.json()).data;
@@ -42,25 +47,35 @@ export async function prepareBudget(apiKey,{fetchImpl=fetch,root=EVAL_ROOT}={}){
   if(!model || !Number.isFinite(account.usage))throw new Error('JEV pricing or account usage unavailable');
   const endpoint=model.endpoints?.[0];
   if(!endpoint)throw new Error('No JEV provider pricing available');
-  const data={model:model.id,pricing:endpoint.pricing,contextLength:endpoint.context_length,startUsage:account.usage,budgetUsd:5};
+  const data={model:model.id,pricing:highestPricing(model.endpoints),contextLength:Math.max(...model.endpoints.map(e=>e.context_length)),startUsage:account.usage,budgetUsd:2};
+  if(luna){
+    if(!lunaResponse?.ok)throw new Error('Luna pricing unavailable');
+    data.lunaPricing=highestPricing((await lunaResponse.json()).data?.endpoints || []);
+  }
   if(!Number.isFinite(Number(data.pricing.prompt)) || !Number.isFinite(Number(data.pricing.completion)))throw new Error('Invalid JEV pricing');
   writeJson(file,data);return data;
 }
 
 // This guard applies to every paid request, including retries. Outstanding and
 // failed calls retain a conservative reservation across process restarts.
-export function budgetedJevFetch(metadata,{root=EVAL_ROOT,fetchImpl=fetch}={}){
+export function budgetedJevFetch(metadata,{root=EVAL_ROOT,fetchImpl=fetch,luna=false}={}){
   const path=join(root,'spend.json');
-  const ledger=existsSync(path)?JSON.parse(readFileSync(path,'utf8')):{budgetUsd:Math.min(5,metadata.budgetUsd),requests:[]};
+  const ledger=existsSync(path)?JSON.parse(readFileSync(path,'utf8')):{budgetUsd:metadata.budgetUsd,requests:[]};
+  ledger.budgetUsd=Math.min(2,metadata.budgetUsd,ledger.budgetUsd);
+  if(!Number.isFinite(ledger.budgetUsd) || ledger.budgetUsd<=0)throw new Error('Invalid evaluation budget');
   const spent=()=>ledger.requests.reduce((sum,r)=>sum+(r.cost ?? r.reservation),0);
   const guarded=async(url,options={})=>{
     const body=JSON.parse(options.body || '{}');
-    if(url!=='https://openrouter.ai/api/alpha/decisions' || body.model!=='typesafe/jev-1.14' || options.method!=='POST')throw new Error('Evaluation permits only JEV decisions on OpenRouter');
+    const isJev=url==='https://openrouter.ai/api/alpha/decisions' && body.model==='typesafe/jev-1.14';
+    const isLuna=luna && url==='https://openrouter.ai/api/v1/chat/completions' && body.model==='openai/gpt-6-luna';
+    if((!isJev && !isLuna) || options.method!=='POST')throw new Error('Evaluation permits only JEV decisions unless Luna is explicitly enabled');
     const count=Object.keys(body.questions || {}).length;
-    if(count<1 || count>100)throw new Error('Invalid evaluation question count');
-    const reservation=Number(metadata.pricing.prompt)*metadata.contextLength*count+
-      Number(metadata.pricing.completion)*65536*count+Number(metadata.pricing.request || 0);
-    if(!Number.isFinite(reservation) || reservation<0 || spent()+reservation>Math.min(5,ledger.budgetUsd))throw new Error('OpenRouter evaluation budget exhausted');
+    if(isJev && (count<1 || count>100))throw new Error('Invalid evaluation question count');
+    if(isLuna && (!Array.isArray(body.messages) || !Number.isSafeInteger(body.max_tokens) || body.max_tokens<1 || body.max_tokens>128000 || !metadata.lunaPricing))throw new Error('Invalid Luna reservation');
+    const pricing=isLuna?metadata.lunaPricing:metadata.pricing;
+    const reservation=Number(pricing.prompt)*(isLuna?Buffer.byteLength(JSON.stringify(body),'utf8')+256:metadata.contextLength*count)+
+      Number(pricing.completion)*(isLuna?body.max_tokens:65536*count)+Number(pricing.request || 0);
+    if(!Number.isFinite(reservation) || reservation<0 || spent()+reservation>ledger.budgetUsd)throw new Error('OpenRouter evaluation budget exhausted');
     const entry={number:ledger.requests.length+1,model:body.model,questions:count,reservation,status:'pending',startedAt:new Date().toISOString()};
     ledger.requests.push(entry);writeJson(path,ledger);
     try{
@@ -71,7 +86,7 @@ export function budgetedJevFetch(metadata,{root=EVAL_ROOT,fetchImpl=fetch}={}){
       const cost=usage.cost ?? usage.total_cost;
       if(Number.isFinite(cost) && cost>=0){entry.cost=cost;entry.costSource='provider';}
       else if(Number.isFinite(input) && input>=0 && Number.isFinite(output) && output>=0){
-        entry.cost=input*Number(metadata.pricing.prompt)+output*Number(metadata.pricing.completion)+Number(metadata.pricing.request || 0);
+        entry.cost=input*Number(pricing.prompt)+output*Number(pricing.completion)+Number(pricing.request || 0);
         entry.costSource='reported tokens and verified pricing';
       }else throw new Error('Provider did not report usage; reservation retained');
       entry.inputTokens=input;entry.outputTokens=output;entry.status='completed';

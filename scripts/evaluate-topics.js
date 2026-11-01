@@ -8,31 +8,42 @@ import {Regulars} from '../src/core.js';
 import {twitchChats} from '../test/fixtures/twitch-chats.js';
 import {EVAL_ROOT,lockEvaluation,readApiKey,prepareBudget,budgetedJevFetch,codexLunaGenerator,groupingMetrics,writeJson} from './topic-eval-support.js';
 
-const {values}=parseArgs({options:{split:{type:'string',default:'dev'},run:{type:'string',default:'baseline-dev'},concurrency:{type:'string',default:'3'},cases:{type:'string'}}});
+const {values}=parseArgs({options:{split:{type:'string',default:'dev'},run:{type:'string',default:'baseline-dev'},concurrency:{type:'string',default:'3'},cases:{type:'string'},luna:{type:'string',default:'codex'}}});
 if(!['dev','holdout','all'].includes(values.split) || !/^[a-z0-9-]+$/.test(values.run))throw new Error('Invalid split or run name');
+if(!['codex','openrouter'].includes(values.luna))throw new Error('Luna must be codex or openrouter');
 const concurrency=Number(values.concurrency);
 if(!Number.isInteger(concurrency) || concurrency<1 || concurrency>3)throw new Error('Concurrency must be 1–3');
 const selected=twitchChats.filter(s=>(values.split==='all' || s.split===values.split) && (!values.cases || values.cases.split(',').includes(s.id)))
   .sort((a,b)=>b.messages.at(-1).at-a.messages.at(-1).at);
 if(!selected.length)throw new Error('No selected scenarios');
 const release=lockEvaluation();process.on('exit',release);
-const apiKey=readApiKey(),metadata=await prepareBudget(apiKey),guard=budgetedJevFetch(metadata);
+const apiKey=readApiKey(),luna=values.luna==='openrouter',metadata=await prepareBudget(apiKey,{luna}),guard=budgetedJevFetch(metadata,{luna});
+const startingSpend=guard.summary().chargedOrReservedUsd;
 const runDirectory=join(EVAL_ROOT,values.run);mkdirSync(runDirectory,{recursive:true,mode:0o700});
 const codeHash=createHash('sha256').update(readFileSync(resolve(import.meta.dirname,'../src/ai.js'))).update(readFileSync(resolve(import.meta.dirname,'../src/core.js'))).digest('hex');
-const naming=codexLunaGenerator();
+const naming=luna?undefined:codexLunaGenerator();
 const results=[];
 
 async function runChat(scenario){
   const wallStart=Date.now(),epoch=Date.parse('2026-10-31T12:00:00Z');
   const now=()=>epoch+Date.now()-wallStart;
   const arrived=new Set(),errors=[],decisions=[],batchDecisions=[],timeline=[],knownAssignments=new Map(),topicStarted=new Map();
-  let namingCalls=0;
-  const ai=createAI({apiKey,offline:false,retries:0,fetchImpl:guard,textGenerator:async request=>{
+  let namingCalls=0,labelCalls=0;
+  const ai=createAI({apiKey,offline:false,retries:0,fetchImpl:guard,textGenerator:naming});
+  const nameSubjects=ai.nameSubjects;
+  ai.nameSubjects=async input=>{
     namingCalls++;
-    const data=JSON.parse(request.messages[1].content);
-    if(data.messages.some(text=>!arrived.has(text)))throw new Error('Naming input contains a message that has not arrived');
-    return naming(request);
-  }});
+    if(input.messages.some(text=>!arrived.has(text)))throw new Error('Naming input contains a message that has not arrived');
+    return nameSubjects(input);
+  };
+  if(ai.labelMessages){
+    const labelMessages=ai.labelMessages;
+    ai.labelMessages=async input=>{
+      labelCalls++;
+      if([...input.earlierChat,...input.targets].some(m=>!arrived.has(typeof m==='string'?m:m.text)))throw new Error('Label input contains a message that has not arrived');
+      return labelMessages(input);
+    };
+  }
   const classify=ai.classify;
   ai.classify=async input=>{
     const result=await classify(input);
@@ -64,6 +75,7 @@ async function runChat(scenario){
     const task=(async()=>{
       app.retryHeld();
       try{await app.discover();snapshot();}catch(error){errors.push({operation:'discovery',message:error.message});}
+      try{await app.labelMessages?.();}catch(error){errors.push({operation:'labels',message:error.message});}
     })().finally(()=>{busy=false;backgroundTasks.delete(task);});
     backgroundTasks.add(task);
   };
@@ -81,12 +93,14 @@ async function runChat(scenario){
     await delay(11000);
     clearInterval(timer);
     await Promise.allSettled([...backgroundTasks,...app.pending]);
-    await app.discover();snapshot();
+    await app.discover();await app.labelMessages?.();snapshot();
     const subjects=app.all('SELECT id,name,description FROM subjects');
     const rows=scenario.messages.map(m=>{
-      const row=app.one('SELECT subject_id,organizer,moderation FROM messages WHERE id=?',m.id);
+      const row=app.one('SELECT * FROM messages WHERE id=?',m.id);
       return {id:m.id,text:m.text,expected:m.expected,at:m.at,subjectId:row?.subject_id || null,
-        subject:subjects.find(s=>s.id===row?.subject_id)?.name || null,organizer:row?.organizer,moderation:row?.moderation};
+        subject:subjects.find(s=>s.id===row?.subject_id)?.name || null,about:row?.about ?? null,thin:m.thin || null,
+        readerVisible:row?.moderation==='cleared' && !m.bot && !m.text.startsWith('!') && !row?.addresses_ai,
+        organizer:row?.organizer,moderation:row?.moderation};
     });
     const metrics=groupingMetrics(rows);
     const delays=Object.entries(metrics.mapping).map(([id,expected])=>{
@@ -94,7 +108,7 @@ async function runChat(scenario){
       return {topic:expected,thirdMessageAt:evidence[2]?.at,discoveredAt:topicStarted.get(id)/1000,
         delaySeconds:topicStarted.get(id)/1000-(evidence[2]?.at || 0)};
     });
-    const result={scenario:scenario.id,name:scenario.name,split:scenario.split,codeHash,metrics,subjects,rows,decisions,batchDecisions,timeline,delays,namingCalls,errors,wallSeconds:(Date.now()-wallStart)/1000};
+    const result={scenario:scenario.id,name:scenario.name,split:scenario.split,codeHash,metrics,subjects,rows,decisions,batchDecisions,timeline,delays,namingCalls,labelCalls,errors,wallSeconds:(Date.now()-wallStart)/1000};
     writeJson(join(runDirectory,`${scenario.id}.json`),result);results.push(result);
     console.log(JSON.stringify({event:'completed',scenario:scenario.id,accuracy:metrics.accuracy,coverage:metrics.coverage,pairPrecision:metrics.pairPrecision,pairRecall:metrics.pairRecall,errors:metrics.errors.length,namingCalls,spend:guard.summary()}));
   }finally{
@@ -112,10 +126,13 @@ const account=accountResponse.ok?(await accountResponse.json()).data:null;
 const total=field=>results.reduce((sum,r)=>sum+r.metrics[field],0);
 const report={run:values.run,codeHash,scenarios:results.length,messages:total('messages'),correct:total('correct'),accuracy:total('correct')/total('messages'),
   topicMessages:total('topicMessages'),topicCorrect:total('topicCorrect'),topicAccuracy:total('topicCorrect')/total('topicMessages'),
-  spend:guard.summary(),accountUsageDeltaUsd:account?account.usage-metadata.startUsage:null,
-  results:results.map(r=>({scenario:r.scenario,...r.metrics,delays:r.delays,namingCalls:r.namingCalls,serviceErrors:r.errors}))};
+  luna:values.luna,spend:guard.summary(),runSpendUsd:guard.summary().chargedOrReservedUsd-startingSpend,accountUsageDeltaUsd:account?account.usage-metadata.startUsage:null,
+  results:results.map(r=>({scenario:r.scenario,...r.metrics,delays:r.delays,namingCalls:r.namingCalls,labelCalls:r.labelCalls,serviceErrors:r.errors}))};
 writeJson(join(runDirectory,'report.json'),report);
 const table=['| Chat | Correct messages | Topic coverage | Pair precision | Pair recall |','|---|---:|---:|---:|---:|',
   ...results.map(r=>`| ${r.name} | ${r.metrics.correct}/${r.metrics.messages} | ${(r.metrics.coverage*100).toFixed(1)}% | ${(r.metrics.pairPrecision*100).toFixed(1)}% | ${(r.metrics.pairRecall*100).toFixed(1)}% |`)];
-writeFileSync(join(runDirectory,'report.md'),`# Topic grouping evaluation: ${values.run}\n\nTimed arrivals at 1× with asynchronous JEV requests. Naming uses the Codex Luna worker. Ground truth is not sent to either model.\n\n${table.join('\n')}\n\nTotal: ${report.correct}/${report.messages} correct (${(report.accuracy*100).toFixed(1)}%).\n\nCumulative JEV charged/reserved: $${report.spend.chargedOrReservedUsd.toFixed(6)} of $5. Account usage delta: ${report.accountUsageDeltaUsd}.\n`,{mode:0o600});
+const cell=text=>String(text ?? '').replace(/\|/g,'\\|').replace(/[\r\n]+/g,' ');
+const labelReview=['| Chat | Message | Expected subject | About label |','|---|---|---|---|',
+  ...results.flatMap(r=>r.rows.filter(m=>m.readerVisible && !m.subjectId).map(m=>`| ${r.scenario} | ${cell(m.text)} | ${cell(m.expected || m.thin || '—')} | ${cell(m.about || '—')} |`))];
+writeFileSync(join(runDirectory,'report.md'),`# Topic grouping evaluation: ${values.run}\n\nTimed arrivals at 1× with asynchronous JEV requests. Naming and labels use ${luna?'OpenRouter Luna':'the Codex Luna worker'}. Ground truth is not sent to either model.\n\n${table.join('\n')}\n\nTotal: ${report.correct}/${report.messages} correct (${(report.accuracy*100).toFixed(1)}%).\n\nCumulative charged/reserved: $${report.spend.chargedOrReservedUsd.toFixed(6)} of $${report.spend.budgetUsd}. This run: $${report.runSpendUsd.toFixed(6)}. Account usage delta: ${report.accountUsageDeltaUsd}.\n\n## Ungrouped label review\n\nEvery reader-visible message left ungrouped is listed below, including thin conversations and reactions.\n\n${labelReview.join('\n')}\n`,{mode:0o600});
 console.log(JSON.stringify({event:'report',...report,results:undefined}));
