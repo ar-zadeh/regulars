@@ -357,6 +357,26 @@ test('recorded replay shows timing, topic labels and playback controls',async()=
   assert.equal(page.get('#privacy').hidden,false);
 });
 
+test('community and sticker readers prefer topic names, fall back to about, and render no category badges',async()=>{
+  const state={session:{id:'labels'},subjects:[{id:'tea',name:'Evening tea'}],messages:[
+    {id:'m',viewerName:'Ana',text:'Which blend is that?',category:'question',subjectId:'tea',about:'Tea choice'},
+  ],nudges:[{id:'n',viewer_id:'ana',message_id:'m',text:'Ana asked a question.'}]};
+  const page=browser('app.js',state);await new Promise(resolve=>setImmediate(resolve));
+  page.get('#community-chip-list').children[0].listeners.click();
+  assert.equal(page.get('#dock-message-category').textContent,'Evening tea');
+  const text=node=>[node.textContent,...node.children.map(text)].join(' ');
+  assert.match(text(page.get('#message-list')),/Evening tea/);
+  assert.doesNotMatch(text(page.get('#community-chip-list')),/Question|Funny|Opinion|Reaction|Other/);
+  assert.doesNotMatch(text(page.get('#message-list')),/\bquestion\b|Question|Funny|Opinion|Reaction|Other/);
+  state.messages[0].subjectId=null;
+  vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
+  assert.equal(page.get('#dock-message-category').textContent,'Tea choice');
+  assert.match(text(page.get('#message-list')),/Tea choice/);
+  state.messages[0].about=null;
+  vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
+  assert.equal(page.get('#dock-message-category').hidden,true);
+});
+
 test('dock dismissal survives refresh within a session and resets for a new stream', async () => {
   const page = browser('app.js', {});
   await new Promise(resolve => setImmediate(resolve));
@@ -407,7 +427,7 @@ test('community names are visible as chips and open the matching private reminde
   const names=()=>page.get('#community-chip-list').children.map(node=>node.children[0].textContent);
   assert.deepEqual(names(),['Ana','Ben','Rae']);
   const ana=page.get('#community-chip-list').children[0];
-  assert.equal(ana.children[1].textContent,'Question');
+  assert.equal(ana.children[1].textContent,'Needs answer');
   assert.match(page.get('#community-chip-list').children[1]['aria-label'],/Ben, Regular/);
   ana.listeners.click();
   assert.equal(page.get('#community-reminders').open,false);
@@ -464,7 +484,7 @@ test('community includes nonregular award types, preserves overlapping roles, an
   state.nudges=[{id:'ana-question',viewer_id:'ana',message_id:'a1',text:'Ana asked a question.'}];
   vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
   assert.equal(page.get('#community-chip-list').children[0],chips[0]);
-  assert.equal(chips[0].children[1].textContent,'Question +2');
+  assert.equal(chips[0].children[1].textContent,'Needs answer +2');
   chips[0].listeners.click();
   assert.equal(page.get('#dock-message-text').textContent,'Which microphone is that?');
   assert.equal(page.get('#dock-community-types').textContent,'Hype Engine · live · Night Owl');
@@ -565,7 +585,7 @@ test('question reminders keep details available without crowding the live view',
   const state = {session:{id:'s'},messages:[{id:'m1',viewerName:'Ana',text:'Next game?'}],nudges:[{id:'n1',message_id:'m1',text:'Ana is here (5 of 5). Ana asked a question. Give it a quick answer when you can.'}]};
   vm.runInContext(`render(${JSON.stringify(state)})`, page.context);
   const card = page.get('#nudge-list').children[0];
-  assert.equal(card.children[0].textContent, 'Ana · Question');
+  assert.equal(card.children[0].textContent, 'Ana · Needs answer');
   assert.equal(card.children[2].textContent, 'Next game?');
   assert.equal(card.children[3].children[1].textContent, 'Ana is here (5 of 5). Ana asked a question.');
   card.children[3].open = true;

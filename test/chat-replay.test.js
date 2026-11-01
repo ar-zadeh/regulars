@@ -52,6 +52,9 @@ test('1x playback preserves exact arrival gaps and reclassifies original message
   assert.equal(replay.results().messages[0].previousResult.category,'opinion');
   assert.equal(replay.results().messages[0].recordedCategory,'opinion');
   assert.equal(replay.state().recent[0].originalCategory,'opinion');
+  app.run("UPDATE messages SET about='Tea choice' WHERE id='m2'");
+  assert.equal(replay.results().messages[2].result.about,'Tea choice');
+  assert.equal(replay.state().recent[0].about,'Tea choice');
   await clock.advance(12000);
   assert.equal(replay.state().status,'completed');
 });

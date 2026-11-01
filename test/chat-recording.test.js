@@ -19,7 +19,9 @@ test('recording keeps arrival gaps, Twitch timestamp precision, identities and m
     await app.ingest({id:'m'+i,viewerId:'v'+i,name:'Viewer '+i,login:'viewer'+i,text:'A question?',timestamp:timestamps[i],
       parentId:i?'m0':null,moderator:i===1,vip:i===2});
   }
+  app.run("UPDATE messages SET about='Tea choice' WHERE id='m0'");
   const recording=recordChat(app.db,{broadcasterId:'owner',name:'Timing test'});
+  assert.equal(recording.messages[0].previousResult.about,'Tea choice');
   assert.deepEqual(recording.messages.map(m=>m.offsetMs),[0,37,4321]);
   assert.deepEqual(recording.messages.map(m=>m.delayMs),[0,37,4284]);
   assert.deepEqual(recording.messages.map(m=>m.timestamp),timestamps);
@@ -34,7 +36,8 @@ test('recording keeps arrival gaps, Twitch timestamp precision, identities and m
   const directory=mkdtempSync(join(tmpdir(),'regulars-recording-test-'));t.after(()=>rmSync(directory,{recursive:true,force:true}));
   const file=join(directory,'recording.json');saveRecording(file,recording);
   assert.deepEqual(loadRecording(file),recording);
-  assert.equal(statSync(file).mode & 0o777,0o600);
+  // Windows exposes writable files as 0666; POSIX permission bits apply there only on Unix.
+  assert.equal(statSync(file).mode & 0o777,process.platform==='win32'?0o666:0o600);
   assert.throws(()=>saveRecording(file,recording),/EEXIST/);
 });
 

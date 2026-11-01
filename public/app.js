@@ -62,7 +62,7 @@ function showNudgePage() {
       const nudgeText = String(typeof nudge === 'string' ? nudge : pick(nudge.text, nudge.message)).replace(/\s*Give it a quick (?:answer|welcome) when you can\./g, '');
       const arrival = nudgeText.match(/^(.+?) is (?:back after missing \d+ streams|here \([^)]+\))\./);
       const viewer = linked ? nameOf(linked) : arrival?.[1] || '';
-      const brief = viewer && nudgeText.includes(`${viewer} asked a question.`) ? `${viewer} · Question` : viewer && nudgeText.includes(`${viewer} sent a first message.`) ? `${viewer} · First message` : arrival ? `${viewer} · ${nudgeText.includes(' is back after missing ') ? 'Returned' : 'Regular'}` : nudgeText;
+      const brief = viewer && nudgeText.includes(`${viewer} asked a question.`) ? `${viewer} · Needs answer` : viewer && nudgeText.includes(`${viewer} sent a first message.`) ? `${viewer} · First message` : arrival ? `${viewer} · ${nudgeText.includes(' is back after missing ') ? 'Returned' : 'Regular'}` : nudgeText;
       card.append(el('div', 'nudge-text', brief));
       if (nudge && typeof nudge === 'object' && nudge.id) {
         const actions = el('div', 'nudge-actions');
@@ -185,7 +185,7 @@ function renderCommunity() {
     const suppliedName = text.match(/^(.+?) (?:is here\b|is back\b|asked a question\b|sent a first message\b|has chosen to lurk\b)/)?.[1];
     const known = members.get(id);
     const name = known?.name || (linked ? nameOf(linked) : pick(nudge.viewerName, suppliedName, 'Viewer'));
-    const status = /asked a question\./.test(text) ? 'Question' : /is back after missing/.test(text) ? 'Returned' : /sent a first message\./.test(text) ? 'First chat' : /is here\b/.test(text) ? 'Say hi' : /has chosen to lurk\b/.test(text) ? 'Quiet mode' : 'Reminder';
+    const status = /asked a question\./.test(text) ? 'Needs answer' : /is back after missing/.test(text) ? 'Returned' : /sent a first message\./.test(text) ? 'First chat' : /is here\b/.test(text) ? 'Say hi' : /has chosen to lurk\b/.test(text) ? 'Quiet mode' : 'Reminder';
     if (!known?.nudge) members.set(id, {name,status,types:known?.types || [],nudge});
   }
   for (const [id, entry] of communityNodes) if (!members.has(id)) { entry.button.remove(); communityNodes.delete(id); }
@@ -239,7 +239,7 @@ function renderCommunityReader() {
   const linked = member?.nudge?.message_id ? arr(lastState.messages).find(item => idOf(item) === String(member.nudge.message_id)) : null;
   const prompts = {'Regular':'A regular is here.', 'Say hi':'Say a quick hello.', 'Returned':'Welcome them back.', 'First chat':'Welcome their first message.', 'Quiet mode':'Quiet mode is on.', 'Reminder':'A private reminder.'};
   const primaryType = member?.types.find(type => type.label === member.status);
-  const text = linked?.text || (member?.status === 'Question' ? 'Original question unavailable.' : primaryType?.detail || prompts[member?.status] || '');
+  const text = linked?.text || (member?.status === 'Needs answer' ? 'Original question unavailable.' : primaryType?.detail || prompts[member?.status] || '');
   $('#dock-subject-name').textContent = member ? `Community · ${member.status}${primaryType?.provisional ? ' · live' : ''}` : 'Community';
   const extras = arr(member?.types).filter(type => type.label !== member.status && type.label !== 'Regular');
   const typeList = $('#dock-community-types');
