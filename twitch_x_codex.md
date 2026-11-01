@@ -510,7 +510,10 @@ joke), never the game, the stream, or a broad theme: "New microphone", not
    lines from the last 2 minutes, in chronological order, to resolve short
    follow-ups. Use this context in discovery and lookback checks too.
    The `false` criterion is "a different point, or only the same game or stream
-   in general". Store probabilities of 0.3 or more.
+   in general". Store probabilities at or above the configured maybe threshold
+   (0.3 by default), and retain those existing subjects as competitors in
+   discovery and lookback. Different aspects of one specific subject, such as
+   new hair colour and its matching profile picture, still belong together.
 3. The best subject at 0.7 or above is primary. If two subjects both reach 0.7,
    the message is **uncertain** unless it is a reply, in which case it takes
    the reply parent's subject. A best of 0.3–0.7 is also uncertain (a sticker
@@ -529,7 +532,10 @@ joke), never the game, the stream, or a broad theme: "New microphone", not
    against each proposal with the step-2 Noul, in bounded batches. A new
    proposal is registered only if 3 messages confidently belong to it. One
    viewer can start a subject with 3 distinct lines; repeating one line does
-   not qualify. Compare competing proposals before assigning ambiguous lines.
+   not qualify. Compare every scored proposal before assigning ambiguous lines,
+   including proposals with fewer than three matches. Only register a new
+   proposal if three qualifying messages remain after competition; messages
+   won by unregistered proposals stay ungrouped.
    Reuse existing subject IDs. Keep the messages' original timestamps.
    Reject generic category names; unassigned messages appear in **Ungrouped**
    with a private 1–4 word about label beside the viewer name. Grouped cards

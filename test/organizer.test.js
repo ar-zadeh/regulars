@@ -19,6 +19,71 @@ function setup(t,model={}){
     }};
 }
 
+test('thin proposals protect their messages during discovery and registered-topic lookback',async t=>{
+  const {app,send}=setup(t,{
+    nameSubjects:async()=>[
+      {name:'Rain sounds',description:'Rain audible on the microphone.'},
+      {name:'Shelf plant',description:'Leaves on the shelf plant.'},
+      {name:'Evening tea',description:'Choosing tea.'},
+    ],
+    scoreSubjects:async({messages,subject})=>messages.map(m=>subject.name==='Rain sounds'?0.8:m.text.startsWith(subject.name)?0.98:0.1),
+  });
+  for(const subject of ['Rain sounds','Shelf plant','Evening tea']){
+    for(let i=0;i<(subject==='Rain sounds'?3:2);i++)await send(`${subject}-${i}`,`${subject} detail ${i}`,i);
+  }
+  await send('lookback','Shelf plant older detail',0);
+  app.run("UPDATE messages SET organizer='unassigned' WHERE id='lookback'");
+  await app.discover();
+  assert.deepEqual(app.all('SELECT name FROM subjects').map(s=>s.name),['Rain sounds']);
+  assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE subject_id IS NOT NULL").n,3);
+  assert.equal(app.one("SELECT subject_id FROM messages WHERE id='lookback'").subject_id,null);
+  assert.ok(app.all("SELECT subject_id FROM messages WHERE text NOT LIKE 'Rain sounds%'").every(m=>m.subject_id===null));
+});
+
+test('stored existing-topic scores block a weaker re-proposal in both discovery and lookback',async t=>{
+  const {app,send}=setup(t,{
+    classify:async({text})=>({category:'question',addressesAI:0,topics:[],subjects:text.startsWith('ramen')?
+      [{id:'food',score:0.81},{id:'boss',score:0.75},{id:'irrelevant',score:0.1}]:[]}),
+    nameSubjects:async()=>[{name:'Boss dodge',description:'Avoiding the boss attack.'}],
+    scoreSubjects:async({messages})=>messages.map(m=>m.text.startsWith('ramen')?0.75:0.95),
+  });
+  app.run("INSERT INTO subjects (id,name,description) VALUES ('food','Late ramen','A noodle break.'),('boss','Boss dodge','Avoiding the boss attack.')");
+  for(let i=0;i<3;i++)await send(`boss-${i}`,`dodge detail ${i}`,i);
+  await send('ramen','ramen break before the next try?',3);
+  await send('old-ramen','ramen is getting cold',4);
+  app.run("UPDATE messages SET organizer='unassigned' WHERE id='old-ramen'");
+  assert.deepEqual(JSON.parse(app.one("SELECT subject_scores FROM messages WHERE id='ramen'").subject_scores),[{id:'food',score:0.81},{id:'boss',score:0.75}]);
+  await app.discover();
+  assert.equal(app.one("SELECT subject_id FROM messages WHERE id='ramen'").subject_id,null);
+  assert.equal(app.one("SELECT subject_id FROM messages WHERE id='old-ramen'").subject_id,null);
+  assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE subject_id='boss'").n,3);
+});
+
+test('a close tie with an unregistered proposal stays ungrouped',async t=>{
+  const {app,send}=setup(t,{
+    nameSubjects:async()=>[{name:'Rain sounds',description:'Rain on the mic.'},{name:'Tea choice',description:'Tea varieties.'}],
+    scoreSubjects:async({messages,subject})=>messages.map(m=>m.text==='Ambiguous line'?(subject.name==='Rain sounds'?0.91:0.87):subject.name==='Rain sounds'?0.95:0.1),
+  });
+  for(let i=0;i<3;i++)await send(String(i),`rain detail ${i}`,i);
+  await send('tie','Ambiguous line',3);
+  await app.discover();
+  assert.equal(app.one("SELECT subject_id FROM messages WHERE id='tie'").subject_id,null);
+  assert.equal(app.one('SELECT COUNT(*) AS n FROM subjects').n,1);
+});
+
+test('a renamed aspect of an existing conversation reuses its ID without a duplicate',async t=>{
+  const {app,send}=setup(t,{
+    nameSubjects:async()=>[{name:'Boss victory',description:'Defeating the boss after many attempts.'}],
+    existingSubject:async({existing})=>existing.find(s=>s.name==='Boss strategy').id,
+    scoreSubject:async()=>0.95,
+  });
+  app.run("INSERT INTO subjects (id,name,description) VALUES ('boss','Boss strategy','The ongoing boss fight.')");
+  for(let i=0;i<3;i++)await send(String(i),`victory detail ${i}`,i);
+  await app.discover();
+  assert.equal(app.one('SELECT COUNT(*) AS n FROM subjects').n,1);
+  assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE subject_id='boss'").n,3);
+});
+
 test('emoji-only messages need no topic model calls while a text reaction with emojis participates',async t=>{
   const requests=[];
   const model=createAI({apiKey:'test',fetchImpl:async(_url,options)=>{

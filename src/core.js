@@ -67,6 +67,7 @@ export class Regulars {
     if(!this.all('PRAGMA table_info(messages)').some(c=>c.name==='received_at')) this.db.exec('ALTER TABLE messages ADD COLUMN received_at TEXT');
     const messageColumns=this.all('PRAGMA table_info(messages)').map(c=>c.name);
     if(!messageColumns.includes('about')) this.db.exec('ALTER TABLE messages ADD COLUMN about TEXT');
+    if(!messageColumns.includes('subject_scores')) this.db.exec("ALTER TABLE messages ADD COLUMN subject_scores TEXT NOT NULL DEFAULT '[]'");
     if(!messageColumns.includes('job_status')) this.db.exec('ALTER TABLE messages ADD COLUMN job_status TEXT');
     if(!messageColumns.includes('retry_at')) this.db.exec('ALTER TABLE messages ADD COLUMN retry_at TEXT');
     if(!messageColumns.includes('retry_count')) this.db.exec('ALTER TABLE messages ADD COLUMN retry_count INTEGER DEFAULT 0');
@@ -248,6 +249,7 @@ export class Regulars {
     }
     this.run('UPDATE messages SET job_status=NULL,retry_at=NULL WHERE id=?',id);
     const {matchThreshold,maybeThreshold}=this.config;
+    this.run('UPDATE messages SET subject_scores=? WHERE id=?',JSON.stringify((result.subjects || []).filter(s=>s.score>=maybeThreshold)),id);
     const matched=(result.topics || []).filter(s=>s.score>=matchThreshold).map(s=>rules.find(r=>r.id===s.id)).filter(Boolean);
     const maybe=(result.topics || []).some(s=>s.score>=maybeThreshold && s.score<matchThreshold);
     if(rules.length && result.nonEnglish>=nonEnglishMaybeThreshold){this.run("UPDATE messages SET moderation='maybe',organizer='unassigned' WHERE id=?",id);return;}
@@ -427,17 +429,30 @@ export class Regulars {
         if(typeof proposal?.name!=='string' || typeof proposal.description!=='string' || !proposal.name.trim() || !proposal.description.trim() || isGenericSubjectName(proposal.name)) continue;
         const key=subjectKey(proposal.name);if(seen.has(key))continue;seen.add(key);
         if(!await this.safeGeneratedText(`${proposal.name}. ${proposal.description}`,identities,controller.signal) || revision!==this.revision) continue;
-        const known=existing.find(s=>subjectKey(s.name)===key);
+        const available=[...candidates.map(c=>c.subject),...existing];
+        let known=available.find(s=>subjectKey(s.name)===key);
+        if(!known && available.length && this.ai.existingSubject){
+          const id=await this.ai.existingSubject({subject:proposal,existing:available,identities,signal:controller.signal});
+          if(revision!==this.revision)return;
+          known=available.find(s=>s.id===id);
+        }
+        if(known && candidates.some(c=>c.subject.id===known.id))continue;
         const subject=known || {id:randomUUID(),name:proposal.name.trim().slice(0,100),description:proposal.description.trim().slice(0,300)};
         const scores=await this.scoreConversation(pool,subject,identities,controller.signal,maxRowid);
         if(revision!==this.revision) return;
-        if(known || conversationEvidence(scores.filter(x=>x.score>=this.config.matchThreshold).map(x=>x.m))) candidates.push({subject,known,scores});
+        candidates.push({subject,known,scores});
       }
       // Compare all proposals before assigning, so proposal order cannot claim
       // an ambiguous message for whichever subject Luna happened to name first.
       const assignments=(messages,options)=>messages.map((m,index)=>{
         const parent=m.parent_id ? this.one("SELECT subject_id FROM messages WHERE id=? AND session_id=? AND rowid<=? AND moderation='cleared'",m.parent_id,session.id,maxRowid) : null;
-        const selected=chooseSubject(options.map(candidate=>({id:candidate.subject.id,score:candidate.scores[index].score,candidate})),this.config.matchThreshold,parent?.subject_id);
+        const scores=new Map(options.map(candidate=>[candidate.subject.id,{id:candidate.subject.id,score:candidate.scores[index].score,candidate}]));
+        for(const stored of JSON.parse(m.subject_scores || '[]')){
+          if(stored.score<this.config.maybeThreshold || !existing.some(subject=>subject.id===stored.id))continue;
+          const current=scores.get(stored.id);
+          if(!current || stored.score>current.score)scores.set(stored.id,{...current,id:stored.id,score:stored.score});
+        }
+        const selected=chooseSubject([...scores.values()],this.config.matchThreshold,parent?.subject_id);
         return {m,candidate:selected?.candidate};
       });
       const selected=assignments(pool,candidates),registered=[];
@@ -454,11 +469,11 @@ export class Regulars {
         const earliest=new Date(this.now()-subjectWindowMs).toISOString();
         const lookback=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND COALESCE(received_at,timestamp)>=? AND moderation='cleared' AND organizer IN ('new','unassigned','uncertain') AND addresses_ai=0 AND text IS NOT NULL ORDER BY timestamp,rowid",session.id,maxRowid,earliest).filter(isTopicMessage);
         const checked=[];
-        for(const candidate of registered){
+        for(const candidate of candidates){
           checked.push({...candidate,scores:await this.scoreConversation(lookback,candidate.subject,identities,controller.signal,maxRowid)});
           if(revision!==this.revision) return;
         }
-        for(const {m,candidate} of assignments(lookback,checked)) if(candidate) this.run("UPDATE messages SET organizer='assigned',subject_id=? WHERE id=? AND moderation='cleared' AND text IS NOT NULL AND organizer IN ('new','unassigned','uncertain')",candidate.subject.id,m.id);
+        for(const {m,candidate} of assignments(lookback,checked)) if(candidate && registered.some(c=>c.subject.id===candidate.subject.id)) this.run("UPDATE messages SET organizer='assigned',subject_id=? WHERE id=? AND moderation='cleared' AND text IS NOT NULL AND organizer IN ('new','unassigned','uncertain')",candidate.subject.id,m.id);
         for(const {subject} of registered) this.run("UPDATE subjects SET last_active=(SELECT MAX(timestamp) FROM messages WHERE subject_id=? AND moderation='cleared') WHERE id=?",subject.id,subject.id);
         // Before a conversation had a name, some of its messages may have been
         // assigned to an older topic. Revisit at most 60 recent assignments,

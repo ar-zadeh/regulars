@@ -48,6 +48,16 @@ test('label safety checks a burst in one decision batch', async () => {
   assert.equal(calls[0].state.blockedTopics[0].name,'Spoilers');
 });
 
+test('existing conversation comparison sanitizes proposals and validates the selected ID',async()=>{
+  let payload;
+  const ai=createAI({apiKey:'test',fetchImpl:async(_url,options)=>{
+    payload=JSON.parse(options.body);return response({answers:{existing:{choice:'subject_0'}}});
+  }});
+  assert.equal(await ai.existingSubject({subject:{name:'Alice boss win'},existing:[{id:'boss',name:'Alice boss strategy'}],identities:['Alice']}),'boss');
+  assert.doesNotMatch(JSON.stringify(payload),/Alice/);
+  assert.equal(await createAI({offline:true}).existingSubject({existing:[{id:'boss'}]}),null);
+});
+
 test('sanitizer consistently masks known aliases, IDs, and mentions', () => {
   const sanitize = createSanitizer([{ login: 'alice', displayName: 'Alice_Star', id: '12345' }]);
   assert.equal(sanitize('@alice and Alice_Star (12345) saw @Bob'),
