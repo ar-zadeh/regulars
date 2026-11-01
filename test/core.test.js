@@ -388,7 +388,7 @@ test('New pool ages from receipt time',async()=>{
   const app=new Regulars({ai:{...ai,nameSubjects:async()=>{naming++;return []; }},now:()=>now});app.startSession();
   for(let i=0;i<3;i++) await app.ingest(event(`old-${i}`,'conversation',String(i%2),-100000+i));
   await app.discover();assert.equal(naming,1);assert.equal(app.one('SELECT organizer FROM messages WHERE id=?','old-0').organizer,'new');
-  now+=120000;await app.discover();assert.equal(app.one('SELECT organizer FROM messages WHERE id=?','old-0').organizer,'unassigned');app.close();
+  now+=300000;await app.discover();assert.equal(app.one('SELECT organizer FROM messages WHERE id=?','old-0').organizer,'unassigned');app.close();
 });
 
 test('naming waits for pool growth and the ten-second interval',async()=>{

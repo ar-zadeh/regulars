@@ -19,13 +19,14 @@ test('Jev uses its decisions endpoint, combines questions, and sanitizes context
       subject_0: { noul: 0.81 }, topic_0: { noul: 0.4 }, nonEnglish: { noul: 0.1 } } });
   } });
   const result = await ai.classify({ text: '@alice what about the microphone?',
-    context: { reply: 'alice had a microphone', title: 'Hi alice', previousLine: 'hello @alice' },
+    context: { reply: 'alice had a microphone', title: 'Hi alice', previousLine: 'hello @alice', recentMessages: ['alice bought a microphone', '@alice sounds clearer'] },
     subjects: [{ id: 's1', name: 'microphone', recent: ['alice hears noise'] }],
     blockedTopics: [{ id: 't1', name: 'spoilers' }], identities: [{ login: 'alice', id: '123' }] });
   assert.equal(url, 'https://openrouter.ai/api/alpha/decisions');
   assert.equal(payload.model, 'typesafe/jev-1.14');
   assert.equal(payload.questions.subject_0.type, 'noul');
   assert.equal(payload.questions.category.type, 'choice');
+  assert.deepEqual(payload.state.recentMessages, ['viewer_1 bought a microphone', 'viewer_1 sounds clearer']);
   assert.doesNotMatch(JSON.stringify(payload), /alice|123/i);
   assert.deepEqual(result, { category: 'question', addressesAI: 0.1, nonEnglish: 0.1,
     subjects: [{ id: 's1', score: 0.81 }], topics: [{ id: 't1', score: 0.4 }] });
@@ -44,6 +45,22 @@ test('commands still get topic checks without organizer questions', async () => 
   assert.equal(result.topics[0].score, 0.91);
 });
 
+test('thirty context-rich subjects are split to fit the live scheduler without dropping decisions',async()=>{
+  const batches=[];
+  const ai=createAI({apiKey:'secret',fetchImpl:async(_url,options)=>{
+    const body=JSON.parse(options.body);batches.push(body);
+    assert.ok(Buffer.byteLength(options.body)+32<=50000);
+    return response({answers:Object.fromEntries(Object.entries(body.questions).map(([key,q])=>[key,q.type==='choice'?{choice:'other'}:{noul:0.1}]))});
+  }});
+  const subjects=Array.from({length:30},(_,i)=>({id:`s${i}`,name:`Conversation ${i}`,
+    description:'People discuss an event and several related details during the stream.'.repeat(2),
+    recent:['A moderately sized chat message about the conversation.'.repeat(2),'Another message continues that conversation.'.repeat(2)]}));
+  const result=await ai.classify({text:'A new chat message',subjects});
+  assert.ok(batches.length>1);
+  assert.deepEqual(result.subjects.map(s=>s.id),subjects.map(s=>s.id));
+  assert.equal(batches.reduce((sum,b)=>sum+Object.keys(b.questions).length,0),32);
+});
+
 test('relevance batch judges each sanitized line independently', async () => {
   let body;
   const ai = createAI({ apiKey: 'secret', fetchImpl: async (_url, options) => {
@@ -53,7 +70,7 @@ test('relevance batch judges each sanitized line independently', async () => {
   const scores = await ai.scoreSubjects({ subject: { id: 'subject-id', name: 'microphone',
     description: 'Alice has a microphone', recent: ['Alice sounds crisp'] },
   messages: [
-    { text: '@Alice likes it', viewerId: 'private-id', context: { reply: 'Alice has a mic', title: 'Alice streams' } },
+    { text: '@Alice likes it', viewerId: 'private-id', context: { reply: 'Alice has a mic', title: 'Alice streams', recentMessages: ['Alice bought a microphone'] } },
     { text: 'unrelated', context: { previousLine: 'Alice mentioned a keyboard' } },
   ], identities: ['Alice'] });
   assert.deepEqual(scores, [0.9, 0.2]);
@@ -61,6 +78,8 @@ test('relevance batch judges each sanitized line independently', async () => {
   assert.deepEqual(Object.keys(body.questions), ['line_0', 'line_1']);
   assert.equal(body.state.messages.length, 2);
   assert.match(body.state.messages[0].message, /viewer_1/);
+  assert.deepEqual(body.state.messages[0].recentMessages, ['viewer_1 bought a microphone']);
+  assert.deepEqual(body.state.messages[1].recentMessages, []);
   assert.doesNotMatch(JSON.stringify(body), /Alice|private-id|subject-id/i);
   assert.doesNotMatch(JSON.stringify(body.questions), /viewer_|microphone|likes it/i);
 });
@@ -77,6 +96,23 @@ test('relevance batches reject invalid size or scores and skip empty requests', 
   assert.equal(calls, 0);
   await assert.rejects(ai.scoreSubjects({ subject, messages: ['mic', 'keyboard'] }), /Invalid decision score/);
   assert.equal(calls, 1);
+});
+
+test('conversation comparison sanitizes choices, maps the selected ID and validates the response',async()=>{
+  let body,choice='subject_1';
+  const ai=createAI({apiKey:'secret',fetchImpl:async(_url,options)=>{
+    body=JSON.parse(options.body);return response({answers:{conversation:{choice}}});
+  }});
+  const input={text:'Alice changed her haircut',identities:['Alice'],subjects:[
+    {id:'show',name:'Moon Harbor',description:'The show ending.'},
+    {id:'person',name:'Alice haircut',description:'Alice has a new haircut.'},
+  ]};
+  assert.equal(await ai.chooseSubject(input),'person');
+  assert.equal(body.model,'typesafe/jev-1.14');
+  assert.equal(body.questions.conversation.type,'choice');
+  assert.doesNotMatch(JSON.stringify(body),/Alice|"person"/i);
+  choice='none';assert.equal(await ai.chooseSubject(input),null);
+  choice='invented';await assert.rejects(ai.chooseSubject(input),/Invalid conversation choice/);
 });
 
 test('classification without questions returns a consistent language score', async () => {
@@ -97,6 +133,16 @@ test('Luna receives sanitized data, low reasoning, and valid naming results', as
   assert.equal(payload.reasoning.effort, 'low');
   assert.doesNotMatch(JSON.stringify(payload), /alice/i);
   assert.deepEqual(result, [{ name: 'Microphone', description: 'A new mic' }]);
+});
+
+test('Luna topic naming rejects category labels and keeps concrete subjects', async () => {
+  const ai = createAI({ apiKey: 'secret', fetchImpl: async () => response({ choices: [{ message: { content: JSON.stringify([
+    {name:'Questions',description:'Viewers asking questions.'},
+    {name:'Chat discussion',description:'A conversation in chat.'},
+    {name:'Stranger Things',description:'Reactions to the series ending.'},
+  ]) } }] }) });
+  assert.deepEqual(await ai.nameSubjects({messages:['Who watched Stranger Things?', 'That ending!', 'It surprised me.']}),
+    [{name:'Stranger Things',description:'Reactions to the series ending.'}]);
 });
 
 test('retries transient failures and validates decision values', async () => {
@@ -280,7 +326,7 @@ test('offline mode works without credentials and never calls the network', async
   const classified = await ai.classify({ text: 'A microphone question?', subjects: [{ id: 's', name: 'microphone' }] });
   assert.equal(classified.category, 'question');
   assert.equal(classified.subjects[0].score, 0.8);
-  assert.equal((await ai.nameSubjects({ messages: ['hello'] })).length, 1);
+  assert.deepEqual(await ai.nameSubjects({ messages: ['hello'] }), []);
   assert.ok(await ai.summarize({ messages: ['hello'] }));
   assert.ok(await ai.stickerBrief({ messages: ['hello'], subject: 'hello' }));
 });

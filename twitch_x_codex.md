@@ -505,27 +505,35 @@ joke), never the game, the stream, or a broad theme: "New microphone", not
    [structured-instructions pattern](https://docs.typesafe.ai/primitives/noul#structured-instructions),
    each subject Noul carries that subject's record: name, description, and its
    latest 2 lines, so Jev compares the message directly with that conversation.
+   Each message also carries its reply and up to 8 preceding eligible chat
+   lines from the last 2 minutes, in chronological order, to resolve short
+   follow-ups. Use this context in discovery and lookback checks too.
    The `false` criterion is "a different point, or only the same game or stream
    in general". Store probabilities of 0.3 or more.
 3. The best subject at 0.7 or above is primary. If two subjects both reach 0.7,
    the message is **uncertain** unless it is a reply, in which case it takes
    the reply parent's subject. A best of 0.3–0.7 is also uncertain (a sticker
    "maybe"). If all are below 0.3, or there are no subjects yet, the message
-   joins the **New pool**.
+   joins the **New pool**. Uncertain messages also participate in discovery:
+   a weak match to an existing subject must not prevent a new topic forming.
 4. A message leaves the pool once it is at least 15 seconds old and 20 newer
-   messages have arrived, or once it is 2 minutes old. In busy chat that is 15
+   messages have arrived, or once it is 5 minutes old. In busy chat that is 15
    seconds; in quiet chat it waits for replies. Leaving the pool doesn't delete
    a message: it keeps its category tag and stays in the chat feed, unassigned.
-5. When the pool holds 3 messages from 2 viewers and has grown since the last
+5. When the pool holds 3 messages and has grown since the last successful
    pass, run a naming pass: one at a time, at most every 10 s. The LLM sees the
-   newest 60 pool messages (text only, no usernames) and the current subject
+   newest 60 pool messages in chronological order (text only, no usernames) and the current subject
    names, and proposes up to 3 subjects, each either new (a name and a
    one-sentence description) or an existing one. Jev checks each pool message
-   against each proposal with the step-2 Noul. A proposal is registered only if
-   3 messages from 2 viewers reach 0.7, and those messages join it with their
-   original timestamps. Subject IDs never change.
+   against each proposal with the step-2 Noul, in bounded batches. A new
+   proposal is registered only if 3 messages confidently belong to it. One
+   viewer can start a subject with 3 distinct lines; repeating one line does
+   not qualify. Compare competing proposals before assigning ambiguous lines.
+   Reuse existing subject IDs. Keep the messages' original timestamps.
+   Reject generic category names; unassigned messages appear in **Ungrouped**
+   while categories remain message badges. Offline mode does not name subjects.
 6. When a subject is registered, run a **lookback**: Jev checks it against the
-   messages from the last 2 minutes that have no primary subject, and matches
+   messages from the last 5 minutes that have no primary subject, and matches
    at 0.7 or above join with their original timestamps. Someone whose opening
    message already left the pool still counts first for Hype Engine. At Wrap,
    run any final naming pass and its dependent lookback within the shared

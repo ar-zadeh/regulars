@@ -11,6 +11,26 @@ test('live bridge routes messages, presence, removals and broadcaster wrap',asyn
   assert.ok(calls.some(c=>c.id==='m' && c.eventId==='evt'));assert.ok(calls.includes('wrap'));assert.deepEqual(calls.at(-1),['remove','m']);bridge.stop();
 });
 
+test('live emote fragments skip topic discovery while mixed text still participates',async t=>{
+  const inputs=[];
+  const app=new Regulars({ai:{classify:async input=>{inputs.push(input);return {category:'other',addressesAI:0,topics:[],subjects:[]};}}});
+  app.startSession();
+  let options;
+  const bridge=await connectLive({app,clientId:'client',accessToken:'token',broadcasterId:'owner',validate:async()=>{},
+    clientFactory:o=>(options=o,{start(){},stop(){},getChatters:async()=>[],deleteMessage:async()=>true}),pollMs:999999});
+  t.after(()=>{bridge.stop();app.close();});
+  const send=async(id,text,fragments)=>options.onEvent({metadata:{message_id:`event-${id}`},payload:{subscription:{type:'channel.chat.message'},
+    event:{message_id:id,chatter_user_id:'viewer',chatter_user_name:'Viewer',message:{text,fragments},badges:[]}}});
+  await send('emote','CustomWave CustomDance',[{type:'emote',text:'CustomWave'},{type:'text',text:' '},{type:'emote',text:'CustomDance'}]);
+  await send('emote-emoji','CustomWave 😂',[{type:'emote',text:'CustomWave'},{type:'text',text:' 😂'}]);
+  await send('mixed','CustomWave nice camera',[{type:'emote',text:'CustomWave'},{type:'text',text:' nice camera'}]);
+  await send('plain','My camera is new',[{type:'text',text:'My camera is new'}]);
+  assert.deepEqual(inputs.map(input=>input.organize),[false,false,true,true]);
+  assert.equal(app.one("SELECT organizer FROM messages WHERE id='emote'").organizer,'reaction');
+  assert.equal(app.rows().find(m=>m.id==='emote-emoji').topicEligible,false);
+  assert.equal(app.one("SELECT organizer FROM messages WHERE id='mixed'").organizer,'new');
+});
+
 test('presence snapshot replaces the previous successful poll and clears on stop', async () => {
   const app = {
     currentSession: () => ({id: 'session'}), sight() {}, startSession() {},

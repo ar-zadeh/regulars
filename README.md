@@ -36,6 +36,25 @@ The live interface is a narrow, tall message reader. In OBS, open
 `http://127.0.0.1:3000` as its URL. Resize it to roughly 320–420 pixels wide.
 
 Chat topics and community members stay visible above the large reading card.
+Luna names concrete conversations, and Jev assigns messages using their recent
+chat and reply context. Topics require three related messages; one viewer can
+start a topic with three distinct lines. Questions, opinions, and reactions
+about the same subject stay together. Messages without a confident topic remain
+in **Ungrouped**, and category tags appear beside the viewer's name. Offline
+mode uses category heuristics and does not discover new topics.
+Quiet chats can accumulate topic evidence for up to five minutes; busy chats
+still retire older candidates after newer messages arrive. Explicit replies
+take precedence over intervening conversation when interpreting short follow-ups.
+A clearly stronger topic match wins; close ties remain ungrouped unless an
+explicit reply resolves them. Greetings and standalone generic reactions do not
+create topics. Unicode emoji-only messages and Twitch emote-only messages skip
+topic discovery and stay out of the topic reader, including Ungrouped. Messages
+with text alongside emojis still participate; reaction-only messages remain in
+the retained chat history.
+Discovery also revisits recent assignments when a new topic appears. Moving an
+already grouped message requires both a strong relevance score and a direct JEV
+comparison with its previous topic. Messages classified during discovery are
+rechecked against any topic that appeared while their request was in flight.
 Each community name includes a reason: **Question**, **Returned**, **First chat**,
 **Say hi**, or **Regular**. **Regular** means a known regular is present without
 a pending reminder. Community cues are private to the streamer.
@@ -134,6 +153,68 @@ trigger an approved sticker with `!sticker <name>`.
 
 ## Test
 
+### Record and replay real chat
+
+Save the latest retained Twitch session from the project directory:
+
+```sh
+npm run chat:save -- --name "Categorizer test"
+```
+
+This creates a private JSON file under `data/recordings/` and prints its path.
+If you have several channel databases, choose one with `--database path.sqlite`;
+use `--session SESSION_ID` for an older retained session. You can also download
+the current session from **Settings → Chat recordings → Save chat recording**
+after the server has been restarted with this version.
+
+The recording includes message text, author and reply IDs, message flags,
+the original Twitch timestamp, the local arrival timestamp, and millisecond
+`offsetMs` / `delayMs` values. Timing follows arrivals, including quiet gaps;
+the first recorded message starts at zero. Older rows without an arrival time
+use their Twitch timestamp. Existing category/topic results are saved as a
+comparison baseline, not treated as correct answers or reused during replay.
+Each message's `category` is its original stored class (`question`, `funny`,
+`opinion`, `reaction`, or `other`). For messages skipped by the organizer,
+`other` can be the app's fallback rather than a JEV decision. Replay logs show
+the original class beside the new one, and results include `recordedCategory`.
+The snapshot also includes the current settings and blocked-topic rules.
+
+Open a separate replay dashboard:
+
+```sh
+npm run chat:replay -- data/recordings/YOUR_RECORDING.json
+```
+
+Visit `http://127.0.0.1:3001` and press **Play**. The dashboard starts paused at
+the beginning. **1×** preserves the recorded intervals; **Pause**, **Resume**,
+**Restart**, **Reset**, and 0.25×–16× speeds are available. Message delivery uses
+absolute deadlines, so an AI request taking longer does not delay later messages.
+The organizer's clock advances with the replay, including while changing speed.
+Pause freezes message delivery and that clock; AI requests already running can
+finish. After the last arrival, processing continues briefly for normal topic
+discovery and the existing failed-classification retry.
+
+Every replay starts with empty messages, topics, and session history and runs
+the current classifier again. Restart keeps settings and blocked-topic edits
+made in the replay dashboard. **Recent arrivals and classifications** shows
+the original gaps and current results; **Download run results** exports every
+message's baseline and new classification, topic, and moderation status.
+
+Replay uses an isolated in-memory database and never connects to Twitch, even
+when `.env` contains Twitch credentials. The live server on port 3000 can keep
+running. Use `--port 3002` if 3001 is occupied. By default, replay uses the same
+configured AI and incurs its usual OpenRouter charges. `--offline` tests playback
+with development heuristics; it does not measure live-model quality. Use 1× for
+realistic categorizer checks: accelerated replay increases concurrent model work.
+
+Saved files are local snapshots, ignored by Git, and kept until you delete them.
+The normal 24-hour database cleanup does not remove these explicitly saved files.
+Messages already removed, expired, or opted out are omitted when saving; later
+changes to live data do not edit an existing recording. Save again to capture
+newer chat. Replay does not fetch historical messages that Regulars never received.
+
+### Automated checks
+
 ```powershell
 npm test
 ```
@@ -143,6 +224,36 @@ synthetic live model requests using the key in `.env`, run
 `node scripts/smoke-models.js`. To generate one paid test image, run
 `node scripts/smoke-image.js`. It saves the image under `data/` and doesn't
 print the key.
+
+### Timed topic quality evaluation
+
+`test/fixtures/twitch-chats.js` contains eleven independent, labeled synthetic
+streams covering quiet chat, bursts, topic changes, replies, one viewer,
+multilingual messages, and injected instructions. Labels remain in the evaluator;
+the models receive only chat that has already arrived. Arrivals run at 1× and
+continue while model requests are pending.
+
+```sh
+node scripts/evaluate-topics.js --split all --run my-check
+```
+
+This evaluation needs a Codex Luna naming worker. It writes the exact naming
+prompt and sanitized input into `data/evals/topic-quality/luna/pending/<id>.json`.
+The worker answers each request with just the requested JSON array, atomically
+saved to `luna/responses/<id>.json`, without reading fixtures, labels, or results.
+Identical prompts reuse their cached response. Missing responses time out; naming
+never falls back to OpenRouter. The normal app's configured generation provider
+is unchanged by this evaluation adapter.
+
+Only JEV requests reach OpenRouter through this runner. Its persistent ledger
+reserves the cost of outstanding calls and enforces a cumulative $5 limit across
+runs. A process lock prevents simultaneous evaluations from sharing that budget
+incorrectly. Do not remove the ledger to continue the same budgeted evaluation.
+Reports, per-message results, discovery timings, and spend are saved locally under
+`data/evals/topic-quality/<run>/`. `--split dev` and `--cases solo,replies` can
+select a smaller run. `--cases multitopic` selects the chat with five interleaved
+subjects. Four of the original ten scenarios initially formed a holdout set;
+once used to guide changes, they should be treated as regression cases.
 
 ## Prototype limits
 

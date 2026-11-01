@@ -14,6 +14,8 @@ import {TwitchOAuth} from './oauth.js';
 import {validateAccessToken} from './twitch.js';
 import {DEFAULT_SETTINGS,readSettings,validateSettings,writeSettings} from './config.js';
 import {DockHotkeys} from './dock-hotkeys.js';
+import {loadRecording,recordChat} from './chat-recording.js';
+import {ChatReplay} from './chat-replay.js';
 
 const root=fileURLToPath(new URL('..',import.meta.url));
 function loadEnv(){
@@ -24,17 +26,19 @@ function loadEnv(){
   }
 }
 loadEnv();
+const recording=process.env.REGULARS_REPLAY_FILE ? loadRecording(process.env.REGULARS_REPLAY_FILE) : null;
 const publicDir=join(root,'public'),dataDir=process.env.REGULARS_DATA_DIR || join(root,'data'); mkdirSync(dataDir,{recursive:true});
 const key=process.env.OPENROUTER_API_KEY,offline=process.env.REGULARS_AI==='offline' || !key;
 const twitchClientId=process.env.TWITCH_CLIENT_ID,twitchAccessToken=process.env.TWITCH_ACCESS_TOKEN,twitchClientSecret=process.env.TWITCH_CLIENT_SECRET,twitchBroadcasterId=process.env.TWITCH_BROADCASTER_ID,twitchRedirectUri=process.env.TWITCH_REDIRECT_URI;
 const botNames=(process.env.TWITCH_BOT_NAMES || '').split(',').map(name=>name.trim()).filter(Boolean);
-const directTwitch=Boolean(twitchClientId && twitchAccessToken && twitchBroadcasterId);
-const oauthConfigured=Boolean(!directTwitch && twitchClientId && twitchClientSecret && twitchBroadcasterId);
+const directTwitch=!recording && Boolean(twitchClientId && twitchAccessToken && twitchBroadcasterId);
+const oauthConfigured=!recording && Boolean(!directTwitch && twitchClientId && twitchClientSecret && twitchBroadcasterId);
 const liveConfigured=directTwitch || oauthConfigured;
 const liveDatabase=liveConfigured ? `regulars-live-${createHash('sha256').update(twitchBroadcasterId).digest('hex').slice(0,24)}.sqlite` : 'regulars.sqlite';
 // Held live messages have one durable recovery attempt; avoid SDK-level retries
 // so the same message does not exceed that total retry budget.
-const ai=createAI({apiKey:key,offline,retries:0}),app=new Regulars({dbPath:join(dataDir,liveDatabase),ai});
+const ai=createAI({apiKey:key,offline,retries:0}),app=new Regulars({dbPath:recording?':memory:':join(dataDir,liveDatabase),ai,
+  broadcasterId:recording?.broadcasterId || 'broadcaster'});
 const dockHotkeys=new DockHotkeys({dataDir});
 let liveBridge=null,liveConnectionTask=null,directController=null,oauth=null,serverClosed=false,liveEpoch=0,liveStatus={connected:false,reason:directTwitch?'Connecting':oauthConfigured?'Sign in required':'Not configured'};
 async function validateCurrentToken(options,epoch,signal){
@@ -55,10 +59,14 @@ function applySettings(settings){
   if(typeof app.setConfig==='function') app.setConfig(settings);else app.config=settings;
   liveBridge?.updateSettings?.(settings);
 }
-applySettings(readSettings(app.db));
+applySettings(recording?.settings || readSettings(app.db));
 const ruleColumns=app.all('PRAGMA table_info(rules)').map(column=>column.name);
 if(!ruleColumns.includes('positive_examples')) app.db.exec("ALTER TABLE rules ADD COLUMN positive_examples TEXT NOT NULL DEFAULT '[]'");
 if(!ruleColumns.includes('negative_examples')) app.db.exec("ALTER TABLE rules ADD COLUMN negative_examples TEXT NOT NULL DEFAULT '[]'");
+if(recording)for(const rule of recording.rules){
+  const id=app.addRule(rule);
+  app.run('UPDATE rules SET positive_examples=?,negative_examples=? WHERE id=?',JSON.stringify(rule.positiveExamples || []),JSON.stringify(rule.negativeExamples || []),id);
+}
 app.timeZone=app.one("SELECT value FROM settings WHERE key='timeZone'")?.value || 'UTC';
 app.dayOneDate=app.one("SELECT value FROM settings WHERE key='dayOneDate'")?.value || undefined;
 expireChatText(app);
@@ -66,6 +74,7 @@ expireChatText(app);
 const retentionTimer=setInterval(()=>expireChatText(app),60*1000);retentionTimer.unref?.();
 let organizerBusy=false,lastOrganizerTick=0,lastSummaryTick=0;
 const organizerTimer=setInterval(async()=>{
+  if(recording) return;
   if(organizerBusy) return;
   const now=Date.now(),organizerDue=now-lastOrganizerTick>=10000;
   if(organizerDue){lastOrganizerTick=now;try{app.retryDeletes();}catch{}}
@@ -82,6 +91,7 @@ const dashboardToken=randomBytes(32).toString('hex'),overlayToken=randomBytes(32
 const renderingStickers=new Set();
 const privacyControllers=new Set();
 app.onPrivacyChange=()=>{for(const controller of privacyControllers) controller.abort();};
+const playback=recording ? new ChatReplay({app,recording}) : null;
 const json=(res,status,value)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(value));};
 const valid=(a,b)=>typeof a==='string' && a.length===b.length && timingSafeEqual(Buffer.from(a),Buffer.from(b));
 function authorized(req){const cookie=(req.headers.cookie || '').split(';').map(x=>x.trim()).find(x=>x.startsWith('regulars_session=')); return valid(cookie?.slice('regulars_session='.length),dashboardToken);}
@@ -241,14 +251,36 @@ const server=http.createServer(async(req,res)=>{
         return res.end(readFileSync(join(root,'scripts','regulars_obs_hotkeys.py')));
       }
       if(req.method==='GET' && path==='/api/config') return json(res,200,{settings:app.config});
+      if(req.method==='GET' && path==='/api/chat/recording'){
+        if(playback) throw new Error('Save recordings from the live dashboard.');
+        const saved=recordChat(app.db,{broadcasterId:twitchBroadcasterId || '',name:'Twitch chat recording'});
+        res.setHeader('Content-Disposition','attachment; filename="regulars-chat.json"');
+        return json(res,200,saved);
+      }
+      if(req.method==='GET' && path==='/api/playback/results'){
+        if(!playback) throw new Error('Open a saved chat replay first.');
+        res.setHeader('Content-Disposition','attachment; filename="regulars-replay-results.json"');
+        return json(res,200,{...playback.results(),aiMode:offline?'offline':'live'});
+      }
       if(req.method==='GET' && path==='/api/state'){
         const state=app.state();if(state.session && liveConfigured) state.session={...state.session,mode:'live',status:liveStatus.connected?'connected':'disconnected'};
+        if(state.session && playback) state.session={...state.session,mode:'recorded-replay',status:playback.status};
         state.rules=app.all('SELECT id,name AS topic,definition,action,positive_examples,negative_examples FROM rules').map(rule=>({...rule,positiveExamples:JSON.parse(rule.positive_examples),negativeExamples:JSON.parse(rule.negative_examples)}));
-        return json(res,200,{...state,stickers:stickerRows(),overlayUrl:`http://${host}/overlay.html?token=${overlayToken}`,aiMode:offline?'offline':'live',replaying,liveStatus,oauthAvailable:!!oauth,settings:{timeZone:app.timeZone,dayOneDate:app.dayOneDate || ''}});
+        return json(res,200,{...state,stickers:stickerRows(),overlayUrl:`http://${host}/overlay.html?token=${overlayToken}`,aiMode:offline?'offline':'live',replaying,liveStatus,oauthAvailable:!!oauth,recordingAvailable:!playback,playback:playback?.state() || null,settings:{timeZone:app.timeZone,dayOneDate:app.dayOneDate || ''}});
       }
       if(req.method!=='POST') return json(res,404,{error:'Not found.'});
       if(!sameOrigin(req)) return json(res,403,{error:'Invalid origin.'});
       const input=await body(req);let match;
+      if(path.startsWith('/api/playback/')){
+        if(!playback) throw new Error('Open a saved chat replay first.');
+        if(path==='/api/playback/play') await playback.play();
+        else if(path==='/api/playback/pause') playback.pause();
+        else if(path==='/api/playback/restart'){await playback.reset();await playback.play();}
+        else if(path==='/api/playback/reset') await playback.reset();
+        else if(path==='/api/playback/speed') playback.setSpeed(input.speed);
+        else return json(res,404,{error:'Unknown playback action.'});
+        return json(res,200,{playback:playback.state()});
+      }
       if(path==='/api/config'){
         if(!input || typeof input!=='object' || Array.isArray(input) || Object.keys(input).length!==1 || !Object.hasOwn(input,'settings')) throw new Error('Provide a settings object.');
         const settings=validateSettings(input.settings,app.config);
@@ -259,6 +291,7 @@ const server=http.createServer(async(req,res)=>{
       if(path==='/api/twitch/connect'){if(!oauth) throw new Error('Twitch app credentials or redirect are not configured.');return json(res,200,{url:oauth.begin()});}
       if(path==='/api/twitch/disconnect'){liveEpoch++;directController?.abort();oauth?.disconnect();liveBridge?.stop();liveBridge=null;app.getFollower=null;liveStatus={connected:false,reason:'Disconnected'};return json(res,200,{ok:true});}
       if(path==='/api/replay'){
+        if(playback) throw new Error('Use the saved recording playback controls.');
         if(liveConfigured) throw new Error('Replay is disabled while a Twitch channel is configured.');
         if(replaying) throw new Error('Replay is already running.');
         prepareDemo();
@@ -306,6 +339,7 @@ const server=http.createServer(async(req,res)=>{
         return json(res,200,{ok:true});
       }
       if(path==='/api/privacy/delete-channel'){
+        if(playback) throw new Error('Use Reset replay to clear this simulation.');
         if(replaying || stickerJobs || app.pending.size || app.naming || app.wrapTask) throw new Error('Wait for active work to finish before deleting channel data.');
         app.revision++;app.abortClassifications();
         app.db.exec('DELETE FROM awards; DELETE FROM stickers; DELETE FROM nudges; DELETE FROM first_messages; DELETE FROM moderation_actions; DELETE FROM messages; DELETE FROM subjects; DELETE FROM rules; DELETE FROM viewers; DELETE FROM events; DELETE FROM sessions; DELETE FROM settings;');app.summary='';app.overlayEvent=null;app.timeZone='UTC';app.dayOneDate=undefined;applySettings({...DEFAULT_SETTINGS});liveBridge?.reset();return json(res,200,{ok:true});
@@ -335,7 +369,8 @@ const port=Number(process.env.PORT ?? 3000);
 server.on('close',()=>{
   dockHotkeys.close();
   serverClosed=true;liveEpoch++;directController?.abort();oauth?.close();app.abortClassifications();clearInterval(retentionTimer);clearInterval(organizerTimer);
-  if(liveConnectionTask) void liveConnectionTask.catch(()=>{}).finally(()=>{liveBridge?.stop();app.close();});
+  if(playback) void playback.close().finally(()=>app.close());
+  else if(liveConnectionTask) void liveConnectionTask.catch(()=>{}).finally(()=>{liveBridge?.stop();app.close();});
   else app.close();
 });
 server.listen(port,'127.0.0.1',()=>{

@@ -36,6 +36,15 @@ let heldDockKey = null;
 let liveTopicMetadata = [];
 const dockTopicNodes = new Map();
 const communityNodes = new Map();
+const chatCategories = {
+  question: {label:'Question'},
+  funny: {label:'Funny'},
+  opinion: {label:'Opinion'},
+  reaction: {label:'Reaction'},
+  other: {label:'Other'},
+};
+const messageCategory = item => Object.hasOwn(chatCategories, item?.category) ? item.category : 'other';
+const dockTopicKey = name => `topic:${name.trim().replace(/\s+/g, ' ').toLocaleLowerCase()}`;
 let nudgeCursor = 0;
 let currentNudgeId = '';
 let nudgeRenderKey = '';
@@ -247,6 +256,7 @@ function renderCommunityReader() {
   $('#dock-subject-position').textContent = '';
   $('#dock-message-author').textContent = member?.name || '';
   $('#dock-message-author').hidden = !member;
+  renderMessageCategory(linked);
   $('#dock-message-text').textContent = text;
   $('#dock-message-text').hidden = !member;
   $('#dock-message-empty').hidden = !!member;
@@ -306,10 +316,10 @@ function dockGroups({includeDismissed = false} = {}) {
   const groups = new Map();
   for (const item of arr(lastState.messages)) {
     const id = idOf(item), text = String(pick(item.text, item.message));
-    if (!id || item.selectable === false || !text.trim() || text.startsWith('!') || (!includeDismissed && dismissedMessages.has(id))) continue;
+    if (!id || item.topicEligible === false || item.selectable === false || !text.trim() || text.startsWith('!') || (!includeDismissed && dismissedMessages.has(id))) continue;
     const subject = subjects.get(String(pick(item.subjectId, item.subject_id)));
-    const name = subject ? String(pick(subject.name, 'Chat')) : 'Other chat';
-    const key = name.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+    const name = subject ? String(pick(subject.name, 'Chat')) : 'Ungrouped';
+    const key = subject ? dockTopicKey(name) : 'ungrouped';
     if (!groups.has(key)) groups.set(key, {key, name, messages: []});
     groups.get(key).messages.push(item);
   }
@@ -317,7 +327,7 @@ function dockGroups({includeDismissed = false} = {}) {
     Number(b.category === 'question') - Number(a.category === 'question') ||
     (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0));
   const order = new Map();
-  for (const key of [...dockTopicNodes.keys(), ...liveTopicMetadata.map(topic => topic.name.trim().replace(/\s+/g, ' ').toLocaleLowerCase())])
+  for (const key of [...dockTopicNodes.keys(), ...liveTopicMetadata.map(topic => dockTopicKey(topic.name)), 'ungrouped'])
     if (!order.has(key)) order.set(key, order.size);
   return [...groups.values()].sort((a,b) => (order.get(a.key) ?? Infinity) - (order.get(b.key) ?? Infinity));
 }
@@ -331,8 +341,14 @@ function selectDockSubject(key) {
   renderDock();
 }
 function renderDockTopics(groups) {
-  const names = new Map(liveTopicMetadata.map(topic => [topic.name.trim().replace(/\s+/g, ' ').toLocaleLowerCase(), topic.name]));
-  for (const group of dockGroups({includeDismissed:true})) if (!names.has(group.key)) names.set(group.key, group.name);
+  const allGroups = dockGroups({includeDismissed:true});
+  const names = new Map(liveTopicMetadata.map(topic => [dockTopicKey(topic.name), topic.name]));
+  for (const group of allGroups) if (!names.has(group.key)) names.set(group.key, group.name);
+  const ungroupedCount = allGroups.find(group => group.key === 'ungrouped')?.messages.length || 0;
+  $('#dock-section-chat').textContent = 'Chat topics';
+  $('#ungrouped-overview').hidden = !ungroupedCount;
+  $('#ungrouped-overview').textContent = `${ungroupedCount} ungrouped${liveTopicMetadata.length ? ' · ' : ''}`;
+  $('#topic-overview').hidden = ungroupedCount > 0 && !liveTopicMetadata.length;
   const pending = new Map(groups.map(group => [group.key, group.messages.length]));
   for (const [key, entry] of dockTopicNodes) {
     if (!names.has(key)) { entry.button.remove(); dockTopicNodes.delete(key); }
@@ -360,6 +376,12 @@ function renderDockTopics(groups) {
   }
   $('#dock-topics-empty').hidden = names.size > 0;
 }
+function renderMessageCategory(item) {
+  const badge = $('#dock-message-category');
+  badge.hidden = !item;
+  badge.textContent = item ? chatCategories[messageCategory(item)].label : '';
+  badge.setAttribute('aria-label', item ? `Message category: ${badge.textContent}` : '');
+}
 function renderDock() {
   syncDockSession();
   const groups = dockGroups();
@@ -368,14 +390,16 @@ function renderDock() {
   $('#dock-section-community').setAttribute('aria-pressed', String(community));
   $('#dock-message-stage').classList.toggle('community-reader', community);
   $('#dock-message-stage').setAttribute('aria-label', community ? 'Current community update' : 'Current chat message');
-  $('#dock-prev-label').textContent = community ? 'Previous person' : 'Previous topic';
-  $('#dock-next-label').textContent = community ? 'Next person' : 'Next topic';
-  $('#dock-subject-prev').setAttribute('aria-label', community ? 'Previous person' : 'Previous topic');
-  $('#dock-subject-next').setAttribute('aria-label', community ? 'Next person' : 'Next topic');
+  $('#dock-prev-label').textContent = community ? 'Previous person' : 'Previous group';
+  $('#dock-next-label').textContent = community ? 'Next person' : 'Next group';
+  $('#dock-subject-prev').setAttribute('aria-label', community ? 'Previous person' : 'Previous group');
+  $('#dock-subject-next').setAttribute('aria-label', community ? 'Next person' : 'Next group');
   $('#dock-keyboard-hint').textContent = `Hold F7 / F8 → ${community ? 'Chat' : 'Community'}`;
   updateCommunitySelection();
   if (community) { renderDockTopics(groups); renderCommunityReader(); return; }
-  let subjectIndex = groups.findIndex(group => group.key === dockSubjectKey);
+  // A naming pass can move the visible message from Ungrouped into a topic.
+  let subjectIndex = groups.findIndex(group => group.messages.some(item => idOf(item) === dockMessageId));
+  if (subjectIndex < 0) subjectIndex = groups.findIndex(group => group.key === dockSubjectKey);
   if (subjectIndex < 0) subjectIndex = 0;
   const group = groups[subjectIndex];
   dockSubjectKey = group?.key || '';
@@ -385,6 +409,7 @@ function renderDock() {
   $('#dock-subject-name').textContent = group?.name || 'Chat';
   $('#dock-subject-position').textContent = group ? `${subjectIndex + 1} / ${groups.length}` : '';
   $('#dock-message-author').textContent = item ? nameOf(item) : '';
+  renderMessageCategory(item);
   $('#dock-community-types').hidden = true;
   const repetitions = Number(item?.count || 1);
   const text = item ? String(pick(item.text, item.message)) + (repetitions > 1 ? ` (×${repetitions})` : '') : '';
@@ -635,6 +660,7 @@ function renderRecentMessages() {
 
 function render(state) {
   lastState = state;
+  renderPlayback(state);
   if (!settingsLoaded && state.settings) {
     $('#award-timezone').value = state.settings.timeZone || 'UTC';
     $('#day-one-date').value = state.settings.dayOneDate || '';
@@ -649,13 +675,13 @@ function render(state) {
   const status = String(pick(session.status, 'waiting'));
   $('#connect-twitch').hidden = !state.oauthAvailable || !!state.liveStatus?.connected;
   $('#connect-twitch').disabled = connectingTwitch;
-  $('#connection-label').textContent = state.liveStatus?.connected ? 'Twitch connected' : state.oauthAvailable ? 'Twitch disconnected' : mode === 'demo' || mode === 'replay' ? 'Demo replay' : 'Not connected';
+  $('#connection-label').textContent = state.playback ? 'Recorded replay' : state.liveStatus?.connected ? 'Twitch connected' : state.oauthAvailable ? 'Twitch disconnected' : mode === 'demo' || mode === 'replay' ? 'Demo replay' : 'Not connected';
   $('#connection-label').hidden = false;
-  $('#session-label').textContent = mode === 'demo' || mode === 'replay' ? `Demo replay · ${status}` : mode === 'live' ? `Live · ${status}` : 'Waiting for a stream';
+  $('#session-label').textContent = state.playback ? `Recorded replay · ${state.playback.status}` : mode === 'demo' || mode === 'replay' ? `Demo replay · ${status}` : mode === 'live' ? `Live · ${status}` : 'Waiting for a stream';
   const presence = arr(state.presence), subjects = arr(state.subjects), stickers = arr(state.stickers);
   // Subjects persist across streams; only show topics backed by a cleared
   // message in the current session, as supplied by the state endpoint.
-  const subjectEvidence = Array.isArray(state.currentSubjectIds) ? state.currentSubjectIds : arr(state.messages).map(item => pick(item.subjectId, item.subject_id));
+  const subjectEvidence = Array.isArray(state.currentSubjectIds) ? state.currentSubjectIds : arr(state.messages).filter(item => item.topicEligible !== false).map(item => pick(item.subjectId, item.subject_id));
   const activeSubjectIds = new Set(subjectEvidence.filter(Boolean).map(String));
   const topicGroups = new Map();
   for (const subject of subjects.filter(item => activeSubjectIds.has(String(item.id)))) {
@@ -765,6 +791,47 @@ function render(state) {
   }
   $('#generate-button').disabled = !selected.size || !$('#sticker-subject').value.trim();
 }
+
+const playbackTime = milliseconds => {
+  const seconds=Math.max(0,Math.floor(Number(milliseconds || 0)/1000));
+  return `${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`;
+};
+function renderPlayback(state) {
+  const playback=state.playback;
+  $('#playback-panel').hidden=!playback;
+  $('#chat-recordings').hidden=!!playback || !state.recordingAvailable;
+  $('#privacy').hidden=!!playback;
+  $('#obs-hotkey-settings').hidden=!!playback;
+  $('#replay-button').hidden=!!playback;
+  if(!playback)return;
+  const active=['playing','processing'].includes(playback.status),resetting=playback.status==='resetting';
+  $('#playback-name').textContent=playback.name;
+  const labels={ready:'Ready to replay',playing:'Playing',paused:'Paused',processing:'Finishing classification and topic discovery',completed:'Replay complete',resetting:'Resetting replay'};
+  $('#playback-status').textContent=`${labels[playback.status] || playback.status} · ${playback.sent} / ${playback.total} messages`;
+  $('#playback-progress').max=Math.max(1,playback.durationMs);
+  $('#playback-progress').value=playback.status==='completed'?Math.max(1,playback.durationMs):playback.elapsedMs;
+  $('#playback-position').textContent=`${playbackTime(playback.elapsedMs)} / ${playbackTime(playback.durationMs)}${playback.nextInMs==null?'':` · Next arrival in ${(playback.nextInMs/1000).toFixed(3)}s of recorded time`}`;
+  $('#playback-clock').textContent=`Recorded time: ${new Date(playback.originalTime).toLocaleString()}`;
+  $('#playback-play').disabled=active || resetting;
+  $('#playback-play').textContent=playback.status==='paused'?'Resume':playback.status==='completed'?'Replay again':'Play';
+  $('#playback-pause').disabled=!active;
+  $('#playback-restart').disabled=resetting;
+  $('#playback-reset').disabled=resetting || playback.status==='ready';
+  if(document.activeElement!==$('#playback-speed'))$('#playback-speed').value=String(playback.speed);
+  $('#playback-ai').textContent=state.aiMode==='live'?'Live AI · uses OpenRouter credits. Each run classifies the chat again.':'Offline heuristics · for testing playback, not AI classification quality.';
+  $('#playback-error').hidden=!playback.error && !playback.held;
+  $('#playback-error').textContent=[playback.error,playback.held?`${playback.held} messages awaiting classification.`:''].filter(Boolean).join(' ');
+  const log=$('#playback-log');clear(log);
+  for(const message of arr(playback.recent)){
+    const item=el('li');
+    const category=message.category?chatCategories[messageCategory(message)].label:message.moderation==='held'?'Awaiting classification':message.moderation || 'Not retained';
+    const original=message.originalCategory?chatCategories[messageCategory({category:message.originalCategory})].label:'';
+    item.append(el('small','',`${playbackTime(message.offsetMs)} · +${(message.delayMs/1000).toFixed(3)}s · ${message.name} · ${original?`Original: ${original} → Replay: `:''}${category}${message.topic?` · ${message.topic}`:''}`),el('span','',message.text));
+    log.append(item);
+  }
+}
+for(const action of ['play','pause','restart','reset'])$('#playback-'+action).addEventListener('click',()=>act(()=>post('/api/playback/'+action),''));
+$('#playback-speed').addEventListener('change',()=>act(()=>post('/api/playback/speed',{speed:Number($('#playback-speed').value)}),''));
 
 async function refresh() {
   if (busy) return;

@@ -105,6 +105,9 @@ kbd { color: var(--muted); background: transparent; border: 1px solid var(--edge
 .dock-counter { color: var(--tertiary); font-size: 10px; }
 .dock-message, .community-reader .dock-message { padding: 6px 0; scrollbar-color: var(--edge) transparent; }
 .dock-author, .community-reader .dock-author { color: var(--text); font-size: 13px; font-weight: 600; line-height: 1.25; margin: 0 0 5px; }
+.dock-message-meta { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 5px 8px; margin-bottom: 6px; }
+.dock-message-meta .dock-author { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.dock-category { display: inline-flex; flex: none; padding: 3px 7px; border: 1px solid var(--edge); border-radius: 4px; background: var(--accent-soft); color: var(--accent); font-size: 10px; font-weight: 600; line-height: 1.2; }
 .dock-message-text { color: var(--text); font-size: 24px; line-height: 1.18; font-weight: 600; letter-spacing: -.5px; }
 .dock-community-types { color: var(--muted); font-size: 11px; line-height: 1.2; font-weight: 400; margin: 0 0 4px; }
 .dock-empty { color: var(--muted); font-size: 17px; }
@@ -231,3 +234,17 @@ input[type="checkbox"] { accent-color: var(--accent-fill); }
 .settings-guidance[open] { padding-bottom: 6px; }
 
 .dock-overview, .dock-reading { display: contents; }
+
+.playback-panel { margin-bottom: 14px; }
+.playback-panel h2 { margin: 5px 0 8px; overflow-wrap: anywhere; }
+.playback-panel progress { display: block; width: 100%; height: 7px; accent-color: var(--accent); }
+.playback-panel .helper { margin: 7px 0; }
+.playback-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.playback-actions .button { flex: 1; min-width: 60px; }
+.playback-speed { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.playback-speed select { flex: 1; min-width: 0; }
+.playback-log { list-style: none; padding: 0; max-height: 280px; overflow-y: auto; }
+.playback-log li { padding: 8px 0; border-bottom: 1px solid var(--edge); font-size: 12px; overflow-wrap: anywhere; }
+.playback-log small { display: block; color: var(--muted); margin-bottom: 4px; }
+#playback-error { color: var(--danger); }
+.chat-recordings { margin: 12px 0 18px; }

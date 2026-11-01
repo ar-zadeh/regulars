@@ -1,18 +1,30 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { computeLoyalty } from './loyalty.js';
-import { createSanitizer } from './ai.js';
+import { createSanitizer, isGenericSubjectName } from './ai.js';
 import { DEFAULT_SETTINGS, validateSettings } from './config.js';
+import { isEmojiOnly } from './emoji.js';
 const reactions = new Set(['lol','lmao','gg','w','pog','poggers','haha','kekw']);
 const ms = value => new Date(value).getTime();
 const nudgePriority = {arrival:1,message:2,return:3,question:4};
 const nonEnglishMaybeThreshold = 0.3;
+const subjectWindowMs = 300000;
+const subjectKey = name => name.trim().replace(/\s+/g,' ').toLocaleLowerCase();
+const conversationEvidence = rows => rows.length>=3 && (new Set(rows.map(m=>m.viewer_id)).size>=2 || new Set(rows.map(m=>repeatKey(m.text))).size>=3);
+const chooseSubject = (scores,threshold,parentId) => {
+  const high=scores.filter(s=>s.score>=threshold).sort((a,b)=>b.score-a.score);
+  // Independent relevance questions can both pass. Require a clear lead;
+  // otherwise only an explicit reply can resolve the tie.
+  if(high.length===1 || (high.length>1 && high[0].score-high[1].score>=0.1))return high[0];
+  return high.find(s=>s.id===parentId);
+};
 export function repeatKey(text, parent = '') {
   const clean = String(text).toLowerCase().replace(/[\u034f\u00ad\u200b-\u200d\u2060\ufeff]|[\u{e0000}-\u{e007f}]/gu, '').trim().replace(/\s+/g,' ');
   const words = clean.split(' ');
   return `${parent}\0${words.every(w => w === words[0]) ? words[0] : clean}`;
 }
-export function isReaction(text) { return String(text).toLowerCase().trim().split(/\s+/).every(w => reactions.has(w)); }
+export function isReaction(text) { return isEmojiOnly(text) || String(text).toLowerCase().trim().split(/\s+/).every(w => reactions.has(w)); }
+const isTopicMessage = m => m.organizer!=='reaction' && !m.bot && !m.addresses_ai && !m.text.startsWith('!') && !isEmojiOnly(m.text);
 const isRepetitionOnly = text => {const words=String(text).toLowerCase().trim().split(/\s+/);return words.length>1 && words.every(word=>word===words[0]);};
 export function discussions(messages, excluded = new Set(), {gapSeconds=60,minContributors=3}={}) {
   const groups = new Map();
@@ -34,7 +46,7 @@ export class Regulars {
   constructor({ dbPath=':memory:', ai, deleteMessage=null, broadcasterId='broadcaster', now=()=>Date.now(),timeZone='UTC',dayOneDate=undefined,getFollower=null,transientModerationTimeout=2000,config=DEFAULT_SETTINGS }={}) {
     this.db=new DatabaseSync(dbPath); this.ai=ai; this.deleteMessage=deleteMessage || (async()=>{});this.deleteMessageAvailable=!!deleteMessage;this.onPrivacyChange=()=>{}; this.broadcasterId=broadcasterId; this.now=now; this.pending=new Set(); this.naming=null; this.summary=''; this.overlayEvent=null; this.revision=0; this.wrapTask=null; this.transientDeletes=new Set();this.classificationControllers=new Map();this.modelControllers=new Set();this.summaryGeneration=0;this.summaryInFlightKey='';
     this.config=Object.freeze(validateSettings(config));
-    this.timeZone=timeZone;this.dayOneDate=dayOneDate || undefined;this.getFollower=getFollower;this.transientModerationTimeout=transientModerationTimeout;this.followDates={};this.followerChecks=new Map();this.presentIds=null;this.intentionalLurkers=new Set();this.knownIdentities=new Map();this.lastNamingAt=-Infinity;this.lastNamedRowid=0;this.lastSummaryKey='';
+    this.timeZone=timeZone;this.dayOneDate=dayOneDate || undefined;this.getFollower=getFollower;this.transientModerationTimeout=transientModerationTimeout;this.followDates={};this.followerChecks=new Map();this.presentIds=null;this.intentionalLurkers=new Set();this.knownIdentities=new Map();this.lastNamingAt=-Infinity;this.lastNamedMessageIds=new Set();this.lastSummaryKey='';
     this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,idx INTEGER NOT NULL,start TEXT NOT NULL,end TEXT,cutoff TEXT,wrapped INTEGER DEFAULT 0,incomplete INTEGER DEFAULT 0);
       CREATE TABLE IF NOT EXISTS viewers (id TEXT PRIMARY KEY,name TEXT NOT NULL,login TEXT,seen TEXT NOT NULL DEFAULT '[]',total INTEGER NOT NULL DEFAULT 0,last_seen INTEGER,muted INTEGER DEFAULT 0,opted_out INTEGER DEFAULT 0);
@@ -76,7 +88,7 @@ export class Regulars {
     const next=Object.freeze(validateSettings(settings));const previous=this.config;
     this.config=next;
     if(previous && (previous.matchThreshold!==next.matchThreshold || previous.maybeThreshold!==next.maybeThreshold)){
-      this.revision++;this.abortClassifications();this.lastSummaryKey='';this.lastNamedRowid=0;this.lastNamingAt=-Infinity;
+      this.revision++;this.abortClassifications();this.lastSummaryKey='';this.lastNamedMessageIds.clear();this.lastNamingAt=-Infinity;
     }
     if(previous && next.maxOpenNudges<previous.maxOpenNudges){
       const session=this.currentSession();
@@ -90,7 +102,7 @@ export class Regulars {
   currentSession(){return this.one('SELECT * FROM sessions WHERE end IS NULL ORDER BY idx DESC LIMIT 1');}
   startSession(timestamp=new Date(this.now()).toISOString()){
     if(this.currentSession()) return this.currentSession();
-    this.revision++;this.abortClassifications();this.naming=null;this.lastNamingAt=-Infinity;this.lastNamedRowid=0;
+    this.revision++;this.abortClassifications();this.naming=null;this.lastNamingAt=-Infinity;this.lastNamedMessageIds.clear();
     this.followDates={};this.followerChecks.clear();this.presentIds=null;this.intentionalLurkers.clear();this.knownIdentities.clear();this.summary='';this.lastSummaryKey='';this.overlayEvent=null;
     const idx=(this.one('SELECT MAX(idx) AS n FROM sessions').n || 0)+1;
     this.run('INSERT INTO sessions (id,idx,start) VALUES (?,?,?)',randomUUID(),idx,timestamp); return this.currentSession();
@@ -211,14 +223,13 @@ export class Regulars {
     const task=this.processMessage(event.id,rules); this.pending.add(task); try{await task;}finally{this.pending.delete(task);}
   }
   async processMessage(id,rules,attempt=0){
-    const m=this.one('SELECT * FROM messages WHERE id=?',id); if(!m || !m.text) return;
+    const m=this.one('SELECT rowid,* FROM messages WHERE id=?',id); if(!m || !m.text) return;
     const revision=this.revision;
-    const subjects=m.organizer==='reaction' ? [] : this.all('SELECT * FROM subjects ORDER BY last_active DESC LIMIT 30').map(subject=>({...subject,recent:this.all("SELECT text FROM messages WHERE subject_id=? AND moderation='cleared' AND text IS NOT NULL AND timestamp<=? ORDER BY timestamp DESC LIMIT 2",subject.id,m.timestamp).reverse().map(row=>row.text)}));
-    const parent=m.parent_id ? this.one("SELECT text,subject_id FROM messages WHERE id=? AND moderation='cleared'",m.parent_id) : null;
-    const parentSubject=parent?.subject_id ? this.one('SELECT name FROM subjects WHERE id=?',parent.subject_id)?.name : '';
-    const previous=this.one("SELECT text FROM messages WHERE viewer_id=? AND id<>? AND moderation='cleared' AND timestamp<=? ORDER BY timestamp DESC LIMIT 1",m.viewer_id,id,m.timestamp);
+    const subjects=m.organizer==='reaction' ? [] : this.all('SELECT * FROM subjects ORDER BY last_active DESC LIMIT 30').map(subject=>({...subject,recent:this.all("SELECT text FROM messages WHERE subject_id=? AND moderation='cleared' AND text IS NOT NULL AND timestamp<=? ORDER BY timestamp DESC LIMIT 2",subject.id,m.timestamp).filter(row=>!isEmojiOnly(row.text)).reverse().map(row=>row.text)}));
+    const context=this.messageContext(m);
+    const parent=m.parent_id ? this.one("SELECT subject_id FROM messages WHERE id=? AND session_id=? AND moderation='cleared'",m.parent_id,m.session_id) : null;
     let result;const controller=new AbortController();this.classificationControllers.set(id,controller);
-    try{result=await this.ai.classify({text:m.text,context:{reply:parent?.text,replySubject:parentSubject,previousLine:previous?.text},blockedTopics:rules,subjects,organize:m.organizer!=='reaction',identities:this.identities(),signal:controller.signal});}
+    try{result=await this.ai.classify({text:m.text,context,blockedTopics:rules,subjects,organize:m.organizer!=='reaction',identities:this.identities(),signal:controller.signal});}
     catch{
       const current=this.one('SELECT text,moderation FROM messages WHERE id=?',id);
       if(controller.signal.aborted && revision!==this.revision && current?.text && current.moderation==='held' && this.currentSession()?.id===m.session_id && attempt<2) return this.processMessage(id,this.all('SELECT * FROM rules'),attempt+1);
@@ -227,6 +238,13 @@ export class Regulars {
     const current=this.one('SELECT * FROM messages WHERE id=?',id);
     if(!current || !current.text || current.moderation!=='held' || this.one('SELECT opted_out FROM viewers WHERE id=?',m.viewer_id)?.opted_out) return;
     if(revision!==this.revision){if(attempt<2)return this.processMessage(id,this.all('SELECT * FROM rules'),attempt+1);this.deferHeld(id);return;}
+    // Discovery can publish a topic while this message is still being scored.
+    // Recheck against the new choices so a lone in-flight line is not stranded
+    // waiting for enough unrelated ungrouped messages to trigger discovery.
+    if(m.organizer!=='reaction' && result.addressesAI<0.7 && attempt<2 &&
+      this.all('SELECT id FROM subjects ORDER BY last_active DESC LIMIT 30').some(s=>!subjects.some(known=>known.id===s.id))){
+      return this.processMessage(id,rules,attempt+1);
+    }
     this.run('UPDATE messages SET job_status=NULL,retry_at=NULL WHERE id=?',id);
     const {matchThreshold,maybeThreshold}=this.config;
     const matched=(result.topics || []).filter(s=>s.score>=matchThreshold).map(s=>rules.find(r=>r.id===s.id)).filter(Boolean);
@@ -234,19 +252,21 @@ export class Regulars {
     if(rules.length && result.nonEnglish>=nonEnglishMaybeThreshold){this.run("UPDATE messages SET moderation='maybe',organizer='unassigned' WHERE id=?",id);return;}
     if(matched.length){this.run("UPDATE messages SET moderation='hidden',organizer='unassigned' WHERE id=?",id);if(matched.some(r=>r.action==='delete')) await this.guardedDelete(id,m.viewer_id,!!m.moderator); return;}
     if(maybe){this.run("UPDATE messages SET moderation='maybe' WHERE id=?",id);return;}
+    const addressesAI=result.addressesAI>=0.7;
     let organizer=m.organizer,subjectId=null;
-    if(organizer!=='reaction'){
-      const scores=(result.subjects || []).filter(s=>s.score>=maybeThreshold).sort((a,b)=>b.score-a.score),high=scores.filter(s=>s.score>=matchThreshold);
-      if(high.length===1){organizer='assigned';subjectId=high[0].id;}
-      else if(high.length>1 && parent?.subject_id && high.some(s=>s.id===parent.subject_id)){organizer='assigned';subjectId=parent.subject_id;}
+    if(organizer!=='reaction' && addressesAI) organizer='unassigned';
+    else if(organizer!=='reaction'){
+      const scores=(result.subjects || []).filter(s=>s.score>=maybeThreshold);
+      const selected=chooseSubject(scores,matchThreshold,parent?.subject_id);
+      if(selected){organizer='assigned';subjectId=selected.id;}
       else if(scores.length) organizer='uncertain';
     }
-    this.run('UPDATE messages SET moderation=?,organizer=?,category=?,subject_id=?,addresses_ai=? WHERE id=?','cleared',organizer,result.category || 'other',subjectId,result.addressesAI>=0.7?1:0,id);
+    this.run('UPDATE messages SET moderation=?,organizer=?,category=?,subject_id=?,addresses_ai=? WHERE id=?','cleared',organizer,result.category || 'other',subjectId,addressesAI?1:0,id);
     if(/^!lurk\s*$/i.test(m.text) && !m.bot && this.currentSession()?.id===m.session_id){
       this.intentionalLurkers.add(m.viewer_id);
       this.run("UPDATE nudges SET text=? WHERE viewer_id=? AND session_id=? AND status IN ('open','waiting')",`${m.name} has chosen to lurk.`,m.viewer_id,m.session_id);
     }
-    if(subjectId) this.run('UPDATE subjects SET last_active=? WHERE id=?',m.timestamp,subjectId);
+    if(subjectId) this.run('UPDATE subjects SET last_active=? WHERE id=? AND (last_active IS NULL OR last_active<?)',m.timestamp,subjectId,m.timestamp);
     if(!m.bot && !m.moderator && !m.vip && organizer!=='reaction' && !isRepetitionOnly(m.text) && this.currentSession()?.id===m.session_id){
       this.run('INSERT OR IGNORE INTO first_messages (session_id,viewer_id,message_id) VALUES (?,?,?)',m.session_id,m.viewer_id,id);
       if(this.one('SELECT message_id FROM first_messages WHERE session_id=? AND viewer_id=?',m.session_id,m.viewer_id)?.message_id===id){
@@ -321,7 +341,7 @@ export class Regulars {
   }
   rows(){
     const messages=this.all("SELECT * FROM messages WHERE session_id=? AND moderation='cleared' AND text IS NOT NULL ORDER BY timestamp,id",this.currentSession()?.id || ''),active=new Map(),rows=[];
-    for(const m of messages){const key=repeatKey(m.text,m.parent_id);let row=active.get(key);if(!row || ms(m.timestamp)-row.start>=this.config.repetitionWindowSeconds*1000){row={id:m.id,text:m.text,start:ms(m.timestamp),count:0,authors:{},category:m.category,subjectId:m.subject_id,viewerName:m.name,timestamp:m.timestamp,selectable:!m.bot && !m.text.startsWith('!') && !m.addresses_ai};rows.push(row);active.set(key,row);}row.count++;row.authors[m.name]=(row.authors[m.name] || 0)+1;}
+    for(const m of messages){const key=repeatKey(m.text,m.parent_id);let row=active.get(key);if(!row || ms(m.timestamp)-row.start>=this.config.repetitionWindowSeconds*1000){row={id:m.id,text:m.text,start:ms(m.timestamp),count:0,authors:{},category:m.category,subjectId:m.subject_id,viewerName:m.name,timestamp:m.timestamp,topicEligible:isTopicMessage(m),selectable:!m.bot && !m.text.startsWith('!') && !m.addresses_ai};rows.push(row);active.set(key,row);}row.count++;row.authors[m.name]=(row.authors[m.name] || 0)+1;}
     return rows;
   }
   async safeGeneratedText(text,identities,signal){
@@ -331,43 +351,117 @@ export class Regulars {
       return result.addressesAI<0.7 && !(result.topics || []).some(topic=>topic.score>=this.config.maybeThreshold);
     } catch {return false;}
   }
+  messageContext(message,maxRowid=Number.MAX_SAFE_INTEGER){
+    const before=Math.min(maxRowid,message.rowid-1);
+    const parent=message.parent_id ? this.one("SELECT text,subject_id FROM messages WHERE id=? AND session_id=? AND rowid<=? AND moderation='cleared' AND text IS NOT NULL",message.parent_id,message.session_id,before) : null;
+    const since=new Date(ms(message.timestamp)-120000).toISOString();
+    const recent=this.all("SELECT text,viewer_id FROM messages WHERE session_id=? AND rowid<=? AND timestamp>=? AND timestamp<=? AND moderation='cleared' AND bot=0 AND addresses_ai=0 AND organizer<>'reaction' AND text IS NOT NULL ORDER BY timestamp DESC,rowid DESC LIMIT 8",message.session_id,before,since,message.timestamp).filter(m=>!isEmojiOnly(m.text));
+    return {reply:parent?.text?.slice(0,500),replySubject:parent?.subject_id ? this.one('SELECT name FROM subjects WHERE id=?',parent.subject_id)?.name : '',
+      previousLine:recent.find(m=>m.viewer_id===message.viewer_id)?.text.slice(0,500),recentMessages:recent.reverse().map(m=>m.text.slice(0,300))};
+  }
+  async scoreConversation(messages,subject,identities,signal,maxRowid){
+    const scores=[];
+    // Keep context-rich batches small enough for the background token budget.
+    for(let start=0;start<messages.length;){
+      const batch=[];let bytes=0;
+      while(start+batch.length<messages.length && batch.length<8){
+        const m=messages[start+batch.length],item={text:m.text,context:this.messageContext(m,maxRowid)};
+        const size=Buffer.byteLength(JSON.stringify(item),'utf8');
+        if(batch.length && bytes+size>10000) break;
+        batch.push(item);bytes+=size;
+      }
+      const values=this.ai.scoreSubjects ? await this.ai.scoreSubjects({messages:batch,subject,identities,signal}) :
+        await Promise.all(batch.map(item=>this.ai.scoreSubject({...item,subject,identities,signal})));
+      for(let i=0;i<batch.length;i++) scores.push({m:messages[start+i],score:values[i]});
+      start+=batch.length;
+    }
+    return scores;
+  }
   async discover(maxRowid=Number.MAX_SAFE_INTEGER,{force=false}={}){
     if(this.naming){await this.naming;if(!force)return;}
     const session=this.currentSession(); if(!session) return;
-    const newRows=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND moderation='cleared' AND organizer='new' AND addresses_ai=0 ORDER BY timestamp DESC",session.id,maxRowid);
-    for(const message of newRows){
+    const pendingRows=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND moderation='cleared' AND organizer IN ('new','uncertain') AND addresses_ai=0 ORDER BY timestamp DESC",session.id,maxRowid);
+    for(const message of pendingRows){
       const age=this.now()-ms(message.received_at || message.timestamp);
       const newer=this.one("SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND rowid>? AND rowid<=?",session.id,message.rowid,maxRowid).n;
-      if(age>=120000 || (age>=15000 && newer>=20)) this.run("UPDATE messages SET organizer='unassigned' WHERE id=? AND organizer='new'",message.id);
+      if(age>=subjectWindowMs || (age>=15000 && newer>=20)) this.run("UPDATE messages SET organizer='unassigned' WHERE id=? AND organizer IN ('new','uncertain')",message.id);
     }
-    const pool=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND moderation='cleared' AND organizer='new' AND addresses_ai=0 ORDER BY timestamp DESC LIMIT 60",session.id,maxRowid);
-    if(pool.length<3 || new Set(pool.map(m=>m.viewer_id)).size<2) return;
-    const newestRowid=Math.max(...pool.map(m=>m.rowid));
-    if(!force && (newestRowid<=this.lastNamedRowid || this.now()-this.lastNamingAt<10000)) return;
-    this.lastNamedRowid=newestRowid;this.lastNamingAt=this.now();
+    const pool=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND moderation='cleared' AND organizer IN ('new','uncertain') AND addresses_ai=0 AND text IS NOT NULL ORDER BY timestamp DESC,rowid DESC LIMIT 60",session.id,maxRowid).filter(isTopicMessage).reverse();
+    if(!conversationEvidence(pool)) return;
+    if(!force && (pool.every(m=>this.lastNamedMessageIds.has(m.id)) || this.now()-this.lastNamingAt<10000)) return;
+    this.lastNamingAt=this.now();
     const revision=this.revision;
     const controller=new AbortController();this.modelControllers.add(controller);
     this.naming=(async()=>{
-      const identities=this.identities(); const proposals=await this.ai.nameSubjects({messages:pool.map(m=>m.text),existing:this.all('SELECT name,description FROM subjects'),identities,signal:controller.signal});
+      const identities=this.identities(),existing=this.all('SELECT * FROM subjects');
+      const proposals=await this.ai.nameSubjects({messages:pool.map(m=>m.text),existing,identities,signal:controller.signal});
       if(revision!==this.revision) return;
+      const candidates=[],seen=new Set();
       for(const proposal of (proposals || []).slice(0,3)){
-        if(!proposal.name || !proposal.description) continue;
+        if(typeof proposal?.name!=='string' || typeof proposal.description!=='string' || !proposal.name.trim() || !proposal.description.trim() || isGenericSubjectName(proposal.name)) continue;
+        const key=subjectKey(proposal.name);if(seen.has(key))continue;seen.add(key);
         if(!await this.safeGeneratedText(`${proposal.name}. ${proposal.description}`,identities,controller.signal) || revision!==this.revision) continue;
-        const subject={id:randomUUID(),name:proposal.name.slice(0,100),description:proposal.description.slice(0,300)};
-        const scores=await Promise.all(pool.map(async m=>({m,score:await this.ai.scoreSubject({text:m.text,subject,identities,signal:controller.signal})})));
+        const known=existing.find(s=>subjectKey(s.name)===key);
+        const subject=known || {id:randomUUID(),name:proposal.name.trim().slice(0,100),description:proposal.description.trim().slice(0,300)};
+        const scores=await this.scoreConversation(pool,subject,identities,controller.signal,maxRowid);
         if(revision!==this.revision) return;
-        const matches=scores.filter(x=>x.score>=this.config.matchThreshold && this.one("SELECT id FROM messages WHERE id=? AND moderation='cleared' AND organizer='new'",x.m.id));
-        if(matches.length<3 || new Set(matches.map(x=>x.m.viewer_id)).size<2) continue;
-        this.run('INSERT INTO subjects (id,name,description,last_active) VALUES (?,?,?,?)',subject.id,subject.name,subject.description,matches[0].m.timestamp);
-        for(const {m} of matches) this.run("UPDATE messages SET organizer='assigned',subject_id=? WHERE id=? AND moderation='cleared' AND organizer='new'",subject.id,m.id);
-        const earliest=new Date(this.now()-120000).toISOString();
-        const lookback=this.all("SELECT * FROM messages WHERE session_id=? AND rowid<=? AND COALESCE(received_at,timestamp)>=? AND moderation='cleared' AND organizer IN ('new','unassigned','uncertain') AND addresses_ai=0 AND text IS NOT NULL",session.id,maxRowid,earliest);
-        for(const m of lookback){
-          const score=await this.ai.scoreSubject({text:m.text,subject,identities,signal:controller.signal});
+        if(known || conversationEvidence(scores.filter(x=>x.score>=this.config.matchThreshold).map(x=>x.m))) candidates.push({subject,known,scores});
+      }
+      // Compare all proposals before assigning, so proposal order cannot claim
+      // an ambiguous message for whichever subject Luna happened to name first.
+      const assignments=(messages,options)=>messages.map((m,index)=>{
+        const parent=m.parent_id ? this.one("SELECT subject_id FROM messages WHERE id=? AND session_id=? AND rowid<=? AND moderation='cleared'",m.parent_id,session.id,maxRowid) : null;
+        const selected=chooseSubject(options.map(candidate=>({id:candidate.subject.id,score:candidate.scores[index].score,candidate})),this.config.matchThreshold,parent?.subject_id);
+        return {m,candidate:selected?.candidate};
+      });
+      const selected=assignments(pool,candidates),registered=[];
+      for(const candidate of candidates){
+        const matches=selected.filter(item=>item.candidate===candidate).map(item=>item.m);
+        if(!matches.length || (!candidate.known && !conversationEvidence(matches))) continue;
+        const {subject}=candidate;
+        if(!candidate.known) this.run('INSERT INTO subjects (id,name,description) VALUES (?,?,?)',subject.id,subject.name,subject.description);
+        registered.push(candidate);
+        for(const m of matches) this.run("UPDATE messages SET organizer='assigned',subject_id=? WHERE id=? AND moderation='cleared' AND organizer IN ('new','uncertain')",subject.id,m.id);
+        this.run("UPDATE subjects SET last_active=(SELECT MAX(timestamp) FROM messages WHERE subject_id=? AND moderation='cleared') WHERE id=?",subject.id,subject.id);
+      }
+      if(registered.length){
+        const earliest=new Date(this.now()-subjectWindowMs).toISOString();
+        const lookback=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND COALESCE(received_at,timestamp)>=? AND moderation='cleared' AND organizer IN ('new','unassigned','uncertain') AND addresses_ai=0 AND text IS NOT NULL ORDER BY timestamp,rowid",session.id,maxRowid,earliest).filter(isTopicMessage);
+        const checked=[];
+        for(const candidate of registered){
+          checked.push({...candidate,scores:await this.scoreConversation(lookback,candidate.subject,identities,controller.signal,maxRowid)});
           if(revision!==this.revision) return;
-          if(score>=this.config.matchThreshold) this.run("UPDATE messages SET organizer='assigned',subject_id=? WHERE id=? AND moderation='cleared' AND text IS NOT NULL AND organizer IN ('new','unassigned','uncertain')",subject.id,m.id);
+        }
+        for(const {m,candidate} of assignments(lookback,checked)) if(candidate) this.run("UPDATE messages SET organizer='assigned',subject_id=? WHERE id=? AND moderation='cleared' AND text IS NOT NULL AND organizer IN ('new','unassigned','uncertain')",candidate.subject.id,m.id);
+        for(const {subject} of registered) this.run("UPDATE subjects SET last_active=(SELECT MAX(timestamp) FROM messages WHERE subject_id=? AND moderation='cleared') WHERE id=?",subject.id,subject.id);
+        // Before a conversation had a name, some of its messages may have been
+        // assigned to an older topic. Revisit at most 60 recent assignments,
+        // requiring both strong relevance and a direct JEV comparison to move.
+        const newTopics=registered.filter(candidate=>!candidate.known);
+        if(newTopics.length && this.ai.chooseSubject){
+          const assigned=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND COALESCE(received_at,timestamp)>=? AND moderation='cleared' AND organizer='assigned' AND addresses_ai=0 AND text IS NOT NULL ORDER BY timestamp DESC,rowid DESC LIMIT 60",session.id,maxRowid,earliest).filter(isTopicMessage).reverse();
+          const competitors=assigned.filter(m=>!newTopics.some(c=>c.subject.id===m.subject_id));
+          const rescored=[];
+          for(const candidate of newTopics){
+            rescored.push({...candidate,scores:await this.scoreConversation(competitors,candidate.subject,identities,controller.signal,maxRowid)});
+            if(revision!==this.revision)return;
+          }
+          const touched=new Set();
+          for(let i=0;i<competitors.length;i++){
+            const m=competitors[i],matches=rescored.filter(c=>c.scores[i].score>=this.config.matchThreshold);
+            if(!matches.length)continue;
+            const original=this.one('SELECT * FROM subjects WHERE id=?',m.subject_id);
+            if(!original)continue;
+            const selected=await this.ai.chooseSubject({text:m.text,context:this.messageContext(m,maxRowid),subjects:[original,...matches.map(c=>c.subject)],identities,signal:controller.signal});
+            if(revision!==this.revision)return;
+            if(!matches.some(c=>c.subject.id===selected))continue;
+            this.run("UPDATE messages SET subject_id=? WHERE id=? AND subject_id=? AND moderation='cleared' AND organizer='assigned' AND addresses_ai=0 AND text IS NOT NULL",selected,m.id,m.subject_id);
+            touched.add(m.subject_id);touched.add(selected);
+          }
+          for(const id of touched)this.run("UPDATE subjects SET last_active=(SELECT MAX(timestamp) FROM messages WHERE subject_id=? AND moderation='cleared') WHERE id=?",id,id);
         }
       }
+      this.lastNamedMessageIds=new Set(pool.map(m=>m.id));
     })();
     const naming=this.naming;
     try{return await naming;}finally{this.modelControllers.delete(controller);if(this.naming===naming)this.naming=null;}
@@ -466,7 +560,7 @@ export class Regulars {
     const session=this.currentSession(), viewers=this.all('SELECT id,name,seen,total,last_seen,muted FROM viewers WHERE opted_out=0');
     const chatting=new Set(session?this.all("SELECT DISTINCT viewer_id FROM messages WHERE session_id=? AND moderation='cleared' AND text IS NOT NULL",session.id).map(m=>m.viewer_id):[]);
     const presence=viewers.filter(v=>session && (this.presentIds ? this.presentIds.has(v.id) : JSON.parse(v.seen).includes(session.idx)) && regularCount(JSON.parse(v.seen),session.idx,this.config)>=this.config.regularMinimum).map(v=>({...v,status:chatting.has(v.id)?'Chatting':'Lurking'})).sort((a,b)=>a.status.localeCompare(b.status)||a.name.localeCompare(b.name));
-    const currentSubjectIds=this.all("SELECT DISTINCT subject_id FROM messages WHERE session_id=? AND moderation='cleared' AND text IS NOT NULL AND subject_id IS NOT NULL",session?.id || '').map(row=>row.subject_id);
+    const currentSubjectIds=[...new Set(this.all("SELECT subject_id,text,organizer,bot,addresses_ai FROM messages WHERE session_id=? AND moderation='cleared' AND text IS NOT NULL AND subject_id IS NOT NULL",session?.id || '').filter(isTopicMessage).map(row=>row.subject_id))];
     return {session:session ? {...session,status:'live',mode:'demo'} : null,summary:this.summary,subjects:this.all('SELECT * FROM subjects ORDER BY last_active DESC'),currentSubjectIds,messages:this.rows(),presence,community:this.community(session,presence),nudgesPaused:!!session?.nudges_paused,nudges:this.all("SELECT * FROM nudges WHERE session_id=? AND status='open' ORDER BY created DESC LIMIT 20",session?.id || ''),rules:this.all('SELECT id,name AS topic,definition,action FROM rules'),maybe:this.all("SELECT id,name AS viewerName,text FROM messages WHERE moderation='maybe' AND text IS NOT NULL"),stickers:this.all('SELECT * FROM stickers'),awards:this.awards()};
   }
 }

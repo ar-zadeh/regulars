@@ -227,6 +227,135 @@ test('dock keeps its current message when new chat arrives and reads full messag
   assert.equal(page.get('#dock-message-text').textContent,'A'.repeat(500));
 });
 
+test('messages awaiting a topic stay together in Ungrouped with category badges', async () => {
+  const page=browser('app.js',{});
+  await new Promise(resolve=>setImmediate(resolve));
+  const counts={question:4,opinion:3,reaction:4,funny:1};
+  const state={session:{id:'categories'},subjects:[],messages:Object.entries(counts).flatMap(([category,count])=>
+    Array.from({length:count},(_,index)=>({id:`${category}-${index}`,viewerName:'One viewer',text:`${category} message ${index}`,category,selectable:true})))};
+  state.messages.push({id:'bot',text:'Bot update',category:'other',selectable:false},{id:'command',text:'!sticker test',category:'other',selectable:true});
+  vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
+  const groups=page.get('#dock-topic-list').children;
+  assert.deepEqual(groups.map(node=>[node.children[0].textContent,node.children[1].textContent]),
+    [['Ungrouped','12']]);
+  assert.equal(page.get('#dock-section-chat').textContent,'Chat topics');
+  assert.equal(page.get('#ungrouped-overview').textContent,'12 ungrouped');
+  assert.equal(page.get('#ungrouped-overview').hidden,false);
+  assert.equal(page.get('#topic-overview').hidden,true);
+  assert.equal(page.get('#dock-message-category').textContent,'Question');
+  assert.equal(page.get('#dock-message-category')['aria-label'],'Message category: Question');
+  assert.equal(page.get('#dock-message-category').hidden,false);
+  for(let i=0;i<4;i++) vm.runInContext('dismissDockMessage()',page.context);
+  assert.equal(page.get('#dock-message-category').textContent,'Opinion');
+  vm.runInContext("handleDockKey({key:'F8',preventDefault(){}});releaseDockKey({key:'F8',preventDefault(){}})",page.context);
+  assert.equal(page.get('#dock-subject-name').textContent,'Ungrouped');
+  vm.runInContext('dismissDockMessage()',page.context);
+  assert.equal(groups[0].children[1].textContent,'7');
+  page.get('#dock-dismiss-undo').listeners.click();
+  assert.equal(groups[0].children[1].textContent,'8');
+  assert.equal(page.requests.some(request=>request.options.method==='POST'),false);
+});
+
+test('emoji and emote noise stays out of topics and Ungrouped while text reactions remain visible',async()=>{
+  const page=browser('app.js',{});await new Promise(resolve=>setImmediate(resolve));
+  const state={session:{id:'emoji-filter'},subjects:[{id:'old',name:'Old emoji topic'},{id:'boss',name:'Boss fight'}],messages:[
+    {id:'assigned-emoji',text:'😂😂',subjectId:'old',category:'funny',topicEligible:false,selectable:true},
+    {id:'ungrouped-emoji',text:'👨‍👩‍👧‍👦',category:'other',topicEligible:false,selectable:true},
+    {id:'emote',text:'CustomWave',category:'other',topicEligible:false,selectable:true},
+    {id:'mixed',text:'That boss 😂',subjectId:'boss',category:'reaction',topicEligible:true,selectable:true},
+    {id:'number',text:'123',category:'other',topicEligible:true,selectable:true},
+  ]};
+  vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
+  assert.equal(vm.runInContext("dockGroups().flatMap(g=>g.messages.map(m=>m.id)).sort().join(',')",page.context),'mixed,number');
+  assert.equal(page.get('#subject-count').textContent,'1');
+  assert.equal(page.get('#ungrouped-overview').textContent,'1 ungrouped · ');
+  assert.equal(page.get('#dock-message-category').textContent,'Reaction');
+  assert.equal(page.get('#dock-message-text').textContent,'That boss 😂');
+  state.messages=state.messages.slice(0,3);
+  vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
+  assert.equal(page.get('#dock-topic-list').children.length,0);
+  assert.equal(page.get('#subject-count').textContent,'0');
+  assert.equal(page.get('#ungrouped-overview').hidden,true);
+  assert.equal(page.get('#dock-message-category').hidden,true);
+  assert.equal(vm.runInContext('lastState.messages.length',page.context),3);
+});
+
+test('naming a topic moves its question and opinion together without losing the reading position', async () => {
+  const page=browser('app.js',{});
+  await new Promise(resolve=>setImmediate(resolve));
+  const state={session:{id:'assignment'},subjects:[{id:'topic',name:'New microphone'}],messages:[
+    {id:'named',text:'That sounds clear',category:'opinion',subjectId:'topic'},
+    {id:'waiting',text:'What microphone is that?',category:'question'},
+    {id:'another',text:'What keyboard is that?',category:'question'},
+  ]};
+  vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
+  const groups=page.get('#dock-topic-list').children;
+  assert.equal(groups.length,2);
+  assert.deepEqual(groups.map(node=>node['data-subject-key']),['topic:new microphone','ungrouped']);
+  assert.equal(page.get('#dock-section-chat').textContent,'Chat topics');
+  assert.equal(page.get('#topic-overview').hidden,false);
+  assert.equal(page.get('#dock-message-category').textContent,'Opinion');
+  groups[1].listeners.click();
+  assert.equal(page.get('#dock-message-text').textContent,'What microphone is that?');
+  state.messages[1].subjectId='topic';
+  vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
+  assert.equal(page.get('#dock-message-text').textContent,'What microphone is that?');
+  assert.equal(page.get('#dock-message-category').textContent,'Question');
+  assert.equal(groups[0]['aria-pressed'],'true');
+  assert.equal(groups[0].children[1].textContent,'2');
+  assert.equal(groups[1].children[1].textContent,'1');
+});
+
+test('category labels clear for an empty reader or an unrelated community update', async () => {
+  const page=browser('app.js',{});
+  await new Promise(resolve=>setImmediate(resolve));
+  const state={session:{id:'category-label'},messages:[{id:'unknown',text:'Hello',category:'unexpected'}],presence:[{id:'regular',name:'Regular viewer'}]};
+  vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
+  assert.equal(page.get('#dock-subject-name').textContent,'Ungrouped');
+  assert.equal(page.get('#dock-message-category').textContent,'Other');
+  vm.runInContext("setDockSection('community')",page.context);
+  assert.equal(page.get('#dock-message-category').hidden,true);
+  assert.equal(page.get('#dock-message-category').textContent,'');
+  vm.runInContext("setDockSection('chat');dismissDockMessage()",page.context);
+  assert.equal(page.get('#dock-message-category').hidden,true);
+  assert.equal(page.get('#dock-message-empty').hidden,false);
+  state.messages=[];
+  vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
+  assert.equal(page.get('#ungrouped-overview').hidden,true);
+  assert.equal(page.get('#dock-topics-empty').hidden,false);
+});
+
+test('recorded replay shows timing, classification results and playback controls',async()=>{
+  const state={aiMode:'live',playback:{name:'Saved chat',status:'paused',speed:1,sent:1,total:2,
+    elapsedMs:37,durationMs:1037,nextInMs:1000,originalTime:'2026-10-31T20:00:00.037Z',held:0,error:'',
+    recent:[{id:'one',name:'Viewer',text:'A question?',category:'question',originalCategory:'opinion',moderation:'cleared',offsetMs:37,delayMs:37,topic:'Microphone'}]}};
+  const page=browser('app.js',state);await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(page.get('#playback-panel').hidden,false);
+  assert.equal(page.get('#connection-label').textContent,'Recorded replay');
+  assert.equal(page.get('#playback-play').textContent,'Resume');
+  assert.equal(page.get('#playback-pause').disabled,true);
+  assert.match(page.get('#playback-position').textContent,/Next arrival in 1\.000s/);
+  assert.equal(page.get('#playback-progress').value,37);
+  assert.equal(page.get('#playback-log').children.length,1);
+  assert.match(page.get('#playback-log').children[0].children[0].textContent,/\+0\.037s.*Question.*Microphone/);
+  assert.match(page.get('#playback-log').children[0].children[0].textContent,/Original: Opinion → Replay: Question/);
+  assert.equal(page.get('#privacy').hidden,true);
+  assert.equal(page.get('#replay-button').hidden,true);
+  page.get('#playback-speed').value='4';page.get('#playback-speed').listeners.change();
+  await new Promise(resolve=>setImmediate(resolve));
+  const speed=page.requests.find(request=>request.url==='/api/playback/speed');
+  assert.deepEqual(JSON.parse(speed.options.body),{speed:4});
+  page.get('#playback-play').listeners.click();await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(page.requests.some(request=>request.url==='/api/playback/play'));
+  state.playback.status='playing';vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
+  assert.equal(page.get('#playback-play').disabled,true);
+  assert.equal(page.get('#playback-pause').disabled,false);
+  vm.runInContext('render({recordingAvailable:true})',page.context);
+  assert.equal(page.get('#playback-panel').hidden,true);
+  assert.equal(page.get('#chat-recordings').hidden,false);
+  assert.equal(page.get('#privacy').hidden,false);
+});
+
 test('dock dismissal survives refresh within a session and resets for a new stream', async () => {
   const page = browser('app.js', {});
   await new Promise(resolve => setImmediate(resolve));

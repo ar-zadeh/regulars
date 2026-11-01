@@ -1,5 +1,6 @@
 import { TwitchClient, validateAccessToken } from './twitch.js';
 import { StickerQueue } from './sticker-queue.js';
+import { isEmojiOnly } from './emoji.js';
 
 // The bridge is opt-in and keeps the broadcaster token in memory only.
 export async function connectLive({
@@ -192,11 +193,15 @@ export async function connectLive({
       const badges = event.badges || [];
       const isModerator = badges.some(b => b.set_id === 'moderator' || b.set_id === 'broadcaster');
       const isVip = badges.some(b => b.set_id === 'vip');
+      const fragments = Array.isArray(event.message?.fragments) ? event.message.fragments : [];
+      const reaction = fragments.some(fragment => ['emote','cheermote','gif'].includes(fragment.type)) &&
+        fragments.every(fragment => ['emote','cheermote','gif'].includes(fragment.type) ||
+          (fragment.type === 'text' && (!String(fragment.text || '').trim() || isEmojiOnly(fragment.text))));
       await app.ingest({
         id: event.message_id, eventId, viewerId: event.chatter_user_id,
         name: event.chatter_user_name, login:event.chatter_user_login, text: event.message?.text || '',
         timestamp: envelope.metadata?.message_timestamp,
-        parentId: event.reply?.parent_message_id, moderator: isModerator, vip:isVip,
+        parentId: event.reply?.parent_message_id, moderator: isModerator, vip:isVip, reaction,
         shared: !!event.source_broadcaster_user_id,bot:isBot(event.chatter_user_login,event.chatter_user_name),
       });
       if (stopped || generation !== privateGeneration) return;
