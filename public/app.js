@@ -36,14 +36,8 @@ let heldDockKey = null;
 let liveTopicMetadata = [];
 const dockTopicNodes = new Map();
 const communityNodes = new Map();
-const chatCategories = {
-  question: {label:'Question'},
-  funny: {label:'Funny'},
-  opinion: {label:'Opinion'},
-  reaction: {label:'Reaction'},
-  other: {label:'Other'},
-};
-const messageCategory = item => Object.hasOwn(chatCategories, item?.category) ? item.category : 'other';
+const messageLabel = item => item ? pick(item.topic, arr(lastState.subjects).find(subject =>
+  String(subject.id) === String(pick(item.subjectId, item.subject_id)))?.name, item.about) : '';
 const dockTopicKey = name => `topic:${name.trim().replace(/\s+/g, ' ').toLocaleLowerCase()}`;
 let nudgeCursor = 0;
 let currentNudgeId = '';
@@ -256,7 +250,7 @@ function renderCommunityReader() {
   $('#dock-subject-position').textContent = '';
   $('#dock-message-author').textContent = member?.name || '';
   $('#dock-message-author').hidden = !member;
-  renderMessageCategory(linked);
+  renderMessageLabel(messageLabel(linked));
   $('#dock-message-text').textContent = text;
   $('#dock-message-text').hidden = !member;
   $('#dock-message-empty').hidden = !!member;
@@ -376,11 +370,11 @@ function renderDockTopics(groups) {
   }
   $('#dock-topics-empty').hidden = names.size > 0;
 }
-function renderMessageCategory(item) {
+function renderMessageLabel(label) {
   const badge = $('#dock-message-category');
-  badge.hidden = !item;
-  badge.textContent = item ? chatCategories[messageCategory(item)].label : '';
-  badge.setAttribute('aria-label', item ? `Message category: ${badge.textContent}` : '');
+  badge.hidden = !label;
+  badge.textContent = label || '';
+  badge.setAttribute('aria-label', label ? `Message topic: ${label}` : '');
 }
 function renderDock() {
   syncDockSession();
@@ -409,7 +403,7 @@ function renderDock() {
   $('#dock-subject-name').textContent = group?.name || 'Chat';
   $('#dock-subject-position').textContent = group ? `${subjectIndex + 1} / ${groups.length}` : '';
   $('#dock-message-author').textContent = item ? nameOf(item) : '';
-  renderMessageCategory(item);
+  renderMessageLabel(group?.key === 'ungrouped' ? item?.about : '');
   $('#dock-community-types').hidden = true;
   const repetitions = Number(item?.count || 1);
   const text = item ? String(pick(item.text, item.message)) + (repetitions > 1 ? ` (×${repetitions})` : '') : '';
@@ -645,7 +639,7 @@ function addMessage(parent, item, selectable = false) {
   body.append(el('div', 'message-name', nameOf(item)));
   const count = Number(pick(item.count, 1));
   body.append(el('div', 'message-text', `${pick(item.text, item.message, '')}${count > 1 ? ` (X${count})` : ''}`));
-  const meta = [item.category, item.match === 'maybe' ? 'Maybe' : '', item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''].filter(Boolean).join(' · ');
+  const meta = [messageLabel(item), item.match === 'maybe' ? 'Maybe' : '', item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''].filter(Boolean).join(' · ');
   if (meta) body.append(el('div', 'message-meta', meta));
   row.append(body);
   parent.append(row);
@@ -824,9 +818,9 @@ function renderPlayback(state) {
   const log=$('#playback-log');clear(log);
   for(const message of arr(playback.recent)){
     const item=el('li');
-    const category=message.category?chatCategories[messageCategory(message)].label:message.moderation==='held'?'Awaiting classification':message.moderation || 'Not retained';
-    const original=message.originalCategory?chatCategories[messageCategory({category:message.originalCategory})].label:'';
-    item.append(el('small','',`${playbackTime(message.offsetMs)} · +${(message.delayMs/1000).toFixed(3)}s · ${message.name} · ${original?`Original: ${original} → Replay: `:''}${category}${message.topic?` · ${message.topic}`:''}`),el('span','',message.text));
+    const label=messageLabel(message) || (message.moderation==='held'?'Awaiting classification':message.moderation==='cleared'?'Ungrouped':message.moderation || 'Not retained');
+    const original=message.originalTopic || message.originalAbout || '';
+    item.append(el('small','',`${playbackTime(message.offsetMs)} · +${(message.delayMs/1000).toFixed(3)}s · ${message.name} · ${original?`Original: ${original} → Replay: `:''}${label}`),el('span','',message.text));
     log.append(item);
   }
 }

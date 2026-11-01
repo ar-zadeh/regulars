@@ -227,12 +227,12 @@ test('dock keeps its current message when new chat arrives and reads full messag
   assert.equal(page.get('#dock-message-text').textContent,'A'.repeat(500));
 });
 
-test('messages awaiting a topic stay together in Ungrouped with category badges', async () => {
+test('messages awaiting a topic stay together in Ungrouped with specific about labels', async () => {
   const page=browser('app.js',{});
   await new Promise(resolve=>setImmediate(resolve));
   const counts={question:4,opinion:3,reaction:4,funny:1};
   const state={session:{id:'categories'},subjects:[],messages:Object.entries(counts).flatMap(([category,count])=>
-    Array.from({length:count},(_,index)=>({id:`${category}-${index}`,viewerName:'One viewer',text:`${category} message ${index}`,category,selectable:true})))};
+    Array.from({length:count},(_,index)=>({id:`${category}-${index}`,viewerName:'One viewer',text:`Detail ${index}`,category,about:category==='question'?'Microphone model':'Audio quality',selectable:true})))};
   state.messages.push({id:'bot',text:'Bot update',category:'other',selectable:false},{id:'command',text:'!sticker test',category:'other',selectable:true});
   vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
   const groups=page.get('#dock-topic-list').children;
@@ -242,11 +242,11 @@ test('messages awaiting a topic stay together in Ungrouped with category badges'
   assert.equal(page.get('#ungrouped-overview').textContent,'12 ungrouped');
   assert.equal(page.get('#ungrouped-overview').hidden,false);
   assert.equal(page.get('#topic-overview').hidden,true);
-  assert.equal(page.get('#dock-message-category').textContent,'Question');
-  assert.equal(page.get('#dock-message-category')['aria-label'],'Message category: Question');
+  assert.equal(page.get('#dock-message-category').textContent,'Microphone model');
+  assert.equal(page.get('#dock-message-category')['aria-label'],'Message topic: Microphone model');
   assert.equal(page.get('#dock-message-category').hidden,false);
   for(let i=0;i<4;i++) vm.runInContext('dismissDockMessage()',page.context);
-  assert.equal(page.get('#dock-message-category').textContent,'Opinion');
+  assert.equal(page.get('#dock-message-category').textContent,'Audio quality');
   vm.runInContext("handleDockKey({key:'F8',preventDefault(){}});releaseDockKey({key:'F8',preventDefault(){}})",page.context);
   assert.equal(page.get('#dock-subject-name').textContent,'Ungrouped');
   vm.runInContext('dismissDockMessage()',page.context);
@@ -269,7 +269,7 @@ test('emoji and emote noise stays out of topics and Ungrouped while text reactio
   assert.equal(vm.runInContext("dockGroups().flatMap(g=>g.messages.map(m=>m.id)).sort().join(',')",page.context),'mixed,number');
   assert.equal(page.get('#subject-count').textContent,'1');
   assert.equal(page.get('#ungrouped-overview').textContent,'1 ungrouped · ');
-  assert.equal(page.get('#dock-message-category').textContent,'Reaction');
+  assert.equal(page.get('#dock-message-category').hidden,true);
   assert.equal(page.get('#dock-message-text').textContent,'That boss 😂');
   state.messages=state.messages.slice(0,3);
   vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
@@ -285,7 +285,7 @@ test('naming a topic moves its question and opinion together without losing the 
   await new Promise(resolve=>setImmediate(resolve));
   const state={session:{id:'assignment'},subjects:[{id:'topic',name:'New microphone'}],messages:[
     {id:'named',text:'That sounds clear',category:'opinion',subjectId:'topic'},
-    {id:'waiting',text:'What microphone is that?',category:'question'},
+    {id:'waiting',text:'What microphone is that?',category:'question',about:'Microphone model'},
     {id:'another',text:'What keyboard is that?',category:'question'},
   ]};
   vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
@@ -294,25 +294,26 @@ test('naming a topic moves its question and opinion together without losing the 
   assert.deepEqual(groups.map(node=>node['data-subject-key']),['topic:new microphone','ungrouped']);
   assert.equal(page.get('#dock-section-chat').textContent,'Chat topics');
   assert.equal(page.get('#topic-overview').hidden,false);
-  assert.equal(page.get('#dock-message-category').textContent,'Opinion');
+  assert.equal(page.get('#dock-message-category').hidden,true);
   groups[1].listeners.click();
   assert.equal(page.get('#dock-message-text').textContent,'What microphone is that?');
+  assert.equal(page.get('#dock-message-category').textContent,'Microphone model');
   state.messages[1].subjectId='topic';
   vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
   assert.equal(page.get('#dock-message-text').textContent,'What microphone is that?');
-  assert.equal(page.get('#dock-message-category').textContent,'Question');
+  assert.equal(page.get('#dock-message-category').hidden,true);
   assert.equal(groups[0]['aria-pressed'],'true');
   assert.equal(groups[0].children[1].textContent,'2');
   assert.equal(groups[1].children[1].textContent,'1');
 });
 
-test('category labels clear for an empty reader or an unrelated community update', async () => {
+test('null and pending labels stay hidden in empty and community readers', async () => {
   const page=browser('app.js',{});
   await new Promise(resolve=>setImmediate(resolve));
   const state={session:{id:'category-label'},messages:[{id:'unknown',text:'Hello',category:'unexpected'}],presence:[{id:'regular',name:'Regular viewer'}]};
   vm.runInContext(`render(${JSON.stringify(state)})`,page.context);
   assert.equal(page.get('#dock-subject-name').textContent,'Ungrouped');
-  assert.equal(page.get('#dock-message-category').textContent,'Other');
+  assert.equal(page.get('#dock-message-category').hidden,true);
   vm.runInContext("setDockSection('community')",page.context);
   assert.equal(page.get('#dock-message-category').hidden,true);
   assert.equal(page.get('#dock-message-category').textContent,'');
@@ -325,10 +326,10 @@ test('category labels clear for an empty reader or an unrelated community update
   assert.equal(page.get('#dock-topics-empty').hidden,false);
 });
 
-test('recorded replay shows timing, classification results and playback controls',async()=>{
+test('recorded replay shows timing, topic labels and playback controls',async()=>{
   const state={aiMode:'live',playback:{name:'Saved chat',status:'paused',speed:1,sent:1,total:2,
     elapsedMs:37,durationMs:1037,nextInMs:1000,originalTime:'2026-10-31T20:00:00.037Z',held:0,error:'',
-    recent:[{id:'one',name:'Viewer',text:'A question?',category:'question',originalCategory:'opinion',moderation:'cleared',offsetMs:37,delayMs:37,topic:'Microphone'}]}};
+    recent:[{id:'one',name:'Viewer',text:'A question?',category:'question',originalCategory:'opinion',originalAbout:'Audio setup',moderation:'cleared',offsetMs:37,delayMs:37,topic:'Microphone'}]}};
   const page=browser('app.js',state);await new Promise(resolve=>setImmediate(resolve));
   assert.equal(page.get('#playback-panel').hidden,false);
   assert.equal(page.get('#connection-label').textContent,'Recorded replay');
@@ -337,8 +338,8 @@ test('recorded replay shows timing, classification results and playback controls
   assert.match(page.get('#playback-position').textContent,/Next arrival in 1\.000s/);
   assert.equal(page.get('#playback-progress').value,37);
   assert.equal(page.get('#playback-log').children.length,1);
-  assert.match(page.get('#playback-log').children[0].children[0].textContent,/\+0\.037s.*Question.*Microphone/);
-  assert.match(page.get('#playback-log').children[0].children[0].textContent,/Original: Opinion → Replay: Question/);
+  assert.match(page.get('#playback-log').children[0].children[0].textContent,/\+0\.037s.*Microphone/);
+  assert.match(page.get('#playback-log').children[0].children[0].textContent,/Original: Audio setup → Replay: Microphone/);
   assert.equal(page.get('#privacy').hidden,true);
   assert.equal(page.get('#replay-button').hidden,true);
   page.get('#playback-speed').value='4';page.get('#playback-speed').listeners.change();

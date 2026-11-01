@@ -8,7 +8,7 @@ export function expireChatText(app, now = Date.now()) {
   let count = 0;
   for (const session of sessions) {
     for (const message of app.all('SELECT id FROM messages WHERE session_id=? AND text IS NOT NULL', session.id)) {
-      if (!protectedIds.has(message.id)) { app.run('UPDATE messages SET text=NULL WHERE id=?', message.id); count++; }
+      if (!protectedIds.has(message.id)) { app.run('UPDATE messages SET text=NULL,about=NULL WHERE id=?', message.id); count++; }
     }
   }
   if (count) app.summary = '';

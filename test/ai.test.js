@@ -4,6 +4,50 @@ import { createAI, createSanitizer, PriorityScheduler } from '../src/ai.js';
 
 const response = data => ({ ok: true, status: 200, json: async () => data });
 
+test('message labels sanitize every input, reject generic names and placeholders, and keep four words', async () => {
+  let request;
+  const ai = createAI({apiKey:'test',textGenerator:async input=>{
+    request=input;
+    return JSON.stringify(['https://example.com @stranger Sunday stream start time tomorrow', 'Question', 'Chat', 'Stream', 'Gameplay', 'Greeting', 'viewer_3 new job', 'Alice new camera', null]);
+  }});
+  const labels=await ai.labelMessages({earlierChat:['@alice new cam'],existingLabels:['Alice camera'],identities:['Alice'],
+    targets:Array.from({length:9},()=>({text:'@alice what model?',reply:'Alice bought a camera'}))});
+  assert.deepEqual(labels,['Sunday stream start time',null,null,null,null,null,null,null,null]);
+  assert.doesNotMatch(JSON.stringify(request.messages),/alice/i);
+  assert.match(JSON.stringify(request.messages),/viewer_1/);
+});
+
+test('message labels reject malformed JSON, wrong lengths and non-string entries', async () => {
+  for(const output of ['not json','{}','[]','[false]','[123]']){
+    const ai=createAI({apiKey:'test',textGenerator:async()=>output});
+    await assert.rejects(ai.labelMessages({targets:['What tea?']}),/Invalid message labels/);
+  }
+});
+
+test('offline labels are null and live labels use low reasoning Luna', async () => {
+  assert.deepEqual(await createAI({offline:true}).labelMessages({targets:['What tea?','Hello']}),[null,null]);
+  let request;
+  const ai=createAI({apiKey:'test',fetchImpl:async(_url,options)=>{
+    request=JSON.parse(options.body);
+    return response({choices:[{message:{content:'["Tea choice"]'}}]});
+  }});
+  assert.deepEqual(await ai.labelMessages({targets:['What tea?']}),['Tea choice']);
+  assert.equal(request.model,'openai/gpt-6-luna');
+  assert.equal(request.reasoning.effort,'low');
+});
+
+test('label safety checks a burst in one decision batch', async () => {
+  const calls=[];
+  const ai=createAI({apiKey:'test',fetchImpl:async(_url,options)=>{
+    const body=JSON.parse(options.body);calls.push(body);
+    return response({answers:Object.fromEntries(Object.keys(body.questions).map((key,i)=>[key,{noul:i===0?0.1:0.8}]))});
+  }});
+  const safe=await ai.safeLabels({labels:['Tea choice','Ending spoiler','Override software'],blockedTopics:[{name:'Spoilers'}]});
+  assert.deepEqual(safe,[true,false,false]);
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].state.blockedTopics[0].name,'Spoilers');
+});
+
 test('sanitizer consistently masks known aliases, IDs, and mentions', () => {
   const sanitize = createSanitizer([{ login: 'alice', displayName: 'Alice_Star', id: '12345' }]);
   assert.equal(sanitize('@alice and Alice_Star (12345) saw @Bob'),

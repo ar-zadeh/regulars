@@ -79,6 +79,7 @@ export class ChatReplay {
       if(organizerDue){
         this.app.retryHeld();
         try{await this.app.discover();}catch{if(generation===this.generation)this.error='Topic discovery failed. Check the AI configuration.';}
+        if(generation===this.generation && !this.closed){try{await this.app.labelMessages();}catch{if(generation===this.generation)this.error='Message labelling failed. Check the AI configuration.';}}
       }
       if(generation!==this.generation || this.closed) return;
       if(summaryDue){try{await this.app.refreshSummary();}catch{if(generation===this.generation)this.error='The chat summary could not be updated.';}}
@@ -102,7 +103,7 @@ export class ChatReplay {
     this.error='';this.status='ready';
   }
   results(){
-    const rows=new Map(this.app.all('SELECT m.id,m.category,m.moderation,m.organizer,s.name AS topic FROM messages m LEFT JOIN subjects s ON s.id=m.subject_id').map(m=>[m.id,m]));
+    const rows=new Map(this.app.all('SELECT m.id,m.category,m.about,m.moderation,m.organizer,s.name AS topic FROM messages m LEFT JOIN subjects s ON s.id=m.subject_id').map(m=>[m.id,m]));
     return {recording:this.recording.name,status:this.status,speed:this.speed,settings:this.app.config,
       messages:this.recording.messages.map(m=>({id:m.id,name:m.name,text:m.text,timestamp:m.timestamp,
         receivedAt:m.receivedAt,offsetMs:m.offsetMs,delayMs:m.delayMs,recordedCategory:m.category ?? m.previousResult?.category ?? null,previousResult:m.previousResult || null,
@@ -111,8 +112,8 @@ export class ChatReplay {
   state(){
     const elapsed=this.elapsed();
     const recent=this.recording.messages.slice(Math.max(0,this.next-12),this.next).reverse().map(m=>{
-      const row=this.app.one('SELECT m.category,m.moderation,s.name AS topic FROM messages m LEFT JOIN subjects s ON s.id=m.subject_id WHERE m.id=?',m.id);
-      return {id:m.id,name:m.name,text:m.text,offsetMs:m.offsetMs,delayMs:m.delayMs,originalCategory:m.category ?? m.previousResult?.category ?? null,...row};
+      const row=this.app.one('SELECT m.category,m.about,m.moderation,s.name AS topic FROM messages m LEFT JOIN subjects s ON s.id=m.subject_id WHERE m.id=?',m.id);
+      return {id:m.id,name:m.name,text:m.text,offsetMs:m.offsetMs,delayMs:m.delayMs,originalTopic:m.previousResult?.topic || null,originalAbout:m.previousResult?.about ?? null,originalCategory:m.category ?? m.previousResult?.category ?? null,...row};
     });
     return {name:this.recording.name,status:this.status,speed:this.speed,elapsedMs:Math.min(elapsed,this.recording.durationMs),
       durationMs:this.recording.durationMs,sent:this.next,total:this.recording.messages.length,

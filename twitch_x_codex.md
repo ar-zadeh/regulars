@@ -488,7 +488,8 @@ Repetition rows:
 
 Separate a message's category from its subject. A question about the
 streamer's new mic is tagged **question** and belongs to the **New microphone**
-subject. Categories are fixed tags; subjects are the groups. A subject is one
+subject. Categories stay internal for reminders and question-first ordering;
+subjects are the visible groups. A subject is one
 specific point people are discussing (a moment, question, claim, or running
 joke), never the game, the stream, or a broad theme: "New microphone", not
 "Streaming gear".
@@ -519,7 +520,7 @@ joke), never the game, the stream, or a broad theme: "New microphone", not
 4. A message leaves the pool once it is at least 15 seconds old and 20 newer
    messages have arrived, or once it is 5 minutes old. In busy chat that is 15
    seconds; in quiet chat it waits for replies. Leaving the pool doesn't delete
-   a message: it keeps its category tag and stays in the chat feed, unassigned.
+   a message: it stays in the chat feed, unassigned, with its about label.
 5. When the pool holds 3 messages and has grown since the last successful
    pass, run a naming pass: one at a time, at most every 10 s. The LLM sees the
    newest 60 pool messages in chronological order (text only, no usernames) and the current subject
@@ -531,7 +532,17 @@ joke), never the game, the stream, or a broad theme: "New microphone", not
    not qualify. Compare competing proposals before assigning ambiguous lines.
    Reuse existing subject IDs. Keep the messages' original timestamps.
    Reject generic category names; unassigned messages appear in **Ungrouped**
-   while categories remain message badges. Offline mode does not name subjects.
+   with a private 1–4 word about label beside the viewer name. Grouped cards
+   show no extra label. Community reminders and sticker selection use the
+   linked message's topic name, then about label, then nothing. Offline mode
+   produces neither topic names nor labels. After discovery, each organizer
+   tick makes at most one Luna labelling call for the newest 30 cleared,
+   readable, ungrouped messages from the last 5 minutes with no label yet.
+   Include up to 20 earlier readable lines, replies, and labels already in use.
+   Store an empty string for no subject so greetings and generic reactions
+   are not retried. Batch safety checks, discard blocked or instructional
+   labels, abort on revision changes, and clear labels when text is removed
+   or expires. Labels never appear in the public overlay or awards.
 6. When a subject is registered, run a **lookback**: Jev checks it against the
    messages from the last 5 minutes that have no primary subject, and matches
    at 0.7 or above join with their original timestamps. Someone whose opening

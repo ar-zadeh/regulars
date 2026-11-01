@@ -26,7 +26,7 @@ export function recordChat(db,{sessionId,name='Chat recording',broadcasterId=''}
       timestamp:m.timestamp,receivedAt,offsetMs,delayMs:offsetMs-previous,parentId:m.parent_id || null,
       bot:!!m.bot,moderator:!!m.moderator,vip:!!m.vip,
       reaction:m.organizer==='reaction' && !m.bot && !m.text.startsWith('!'),
-      previousResult:{category:m.category,moderation:m.moderation,topic:m.topic_name || null}};
+      previousResult:{category:m.category,about:m.about ?? null,moderation:m.moderation,topic:m.topic_name || null}};
     previous=offsetMs;return entry;
   });
   const hasSettings=!!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'").get();

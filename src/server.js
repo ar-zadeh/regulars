@@ -83,7 +83,7 @@ const organizerTimer=setInterval(async()=>{
   if(!organizerDue && !summaryDue) return;
   organizerBusy=true;
   try{
-    if(organizerDue){try{app.retryHeld();}catch{}try{await app.discover();}catch{}}
+    if(organizerDue){try{app.retryHeld();}catch{}try{await app.discover();}catch{}try{await app.labelMessages();}catch{}}
     if(summaryDue){lastSummaryTick=now;try{await app.refreshSummary();}catch{}}
   }finally{organizerBusy=false;}
 },1000);organizerTimer.unref?.();

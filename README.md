@@ -40,8 +40,12 @@ Luna names concrete conversations, and Jev assigns messages using their recent
 chat and reply context. Topics require three related messages; one viewer can
 start a topic with three distinct lines. Questions, opinions, and reactions
 about the same subject stay together. Messages without a confident topic remain
-in **Ungrouped**, and category tags appear beside the viewer's name. Offline
-mode uses category heuristics and does not discover new topics.
+in **Ungrouped**, where a private 1–4 word label names each message's subject.
+Greetings, generic reactions, and pending labels show no badge. Grouped cards
+use their topic header without an extra label. Community reminders and sticker
+selection show the topic name or about label. Offline mode produces no labels
+and does not discover new topics. Labelling uses at most one Luna call per
+organizer tick, for up to 30 recent ungrouped messages; safety checks are batched.
 Quiet chats can accumulate topic evidence for up to five minutes; busy chats
 still retire older candidates after newer messages arrive. Explicit replies
 take precedence over intervening conversation when interpreting short follow-ups.
@@ -171,12 +175,14 @@ The recording includes message text, author and reply IDs, message flags,
 the original Twitch timestamp, the local arrival timestamp, and millisecond
 `offsetMs` / `delayMs` values. Timing follows arrivals, including quiet gaps;
 the first recorded message starts at zero. Older rows without an arrival time
-use their Twitch timestamp. Existing category/topic results are saved as a
+use their Twitch timestamp. Existing category, topic, and about-label results are saved as a
 comparison baseline, not treated as correct answers or reused during replay.
 Each message's `category` is its original stored class (`question`, `funny`,
 `opinion`, `reaction`, or `other`). For messages skipped by the organizer,
 `other` can be the app's fallback rather than a JEV decision. Replay logs show
-the original class beside the new one, and results include `recordedCategory`.
+topic names or about labels. Downloaded results retain `category` and
+`recordedCategory` and include `about`. Older recordings without labels still
+load; saved labels are optional in `previousResult`.
 The snapshot also includes the current settings and blocked-topic rules.
 
 Open a separate replay dashboard:
@@ -198,7 +204,8 @@ Every replay starts with empty messages, topics, and session history and runs
 the current classifier again. Restart keeps settings and blocked-topic edits
 made in the replay dashboard. **Recent arrivals and classifications** shows
 the original gaps and current results; **Download run results** exports every
-message's baseline and new classification, topic, and moderation status.
+message's baseline and new classification, topic, about label, and moderation
+status.
 
 Replay uses an isolated in-memory database and never connects to Twitch, even
 when `.env` contains Twitch credentials. The live server on port 3000 can keep

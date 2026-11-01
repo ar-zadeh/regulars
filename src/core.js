@@ -66,6 +66,7 @@ export class Regulars {
     if(!sessionColumns.includes('last_nudge_at')) this.db.exec('ALTER TABLE sessions ADD COLUMN last_nudge_at TEXT');
     if(!this.all('PRAGMA table_info(messages)').some(c=>c.name==='received_at')) this.db.exec('ALTER TABLE messages ADD COLUMN received_at TEXT');
     const messageColumns=this.all('PRAGMA table_info(messages)').map(c=>c.name);
+    if(!messageColumns.includes('about')) this.db.exec('ALTER TABLE messages ADD COLUMN about TEXT');
     if(!messageColumns.includes('job_status')) this.db.exec('ALTER TABLE messages ADD COLUMN job_status TEXT');
     if(!messageColumns.includes('retry_at')) this.db.exec('ALTER TABLE messages ADD COLUMN retry_at TEXT');
     if(!messageColumns.includes('retry_count')) this.db.exec('ALTER TABLE messages ADD COLUMN retry_count INTEGER DEFAULT 0');
@@ -190,7 +191,7 @@ export class Regulars {
   removeMessage(id){
     if(!id) return;
     this.revision++;this.abortClassifications(); this.summary='';this.lastSummaryKey='';
-    this.run("UPDATE messages SET text=NULL,moderation='removed',subject_id=NULL WHERE id=?",id); this.run('DELETE FROM nudges WHERE message_id=?',id);
+    this.run("UPDATE messages SET text=NULL,about=NULL,moderation='removed',subject_id=NULL WHERE id=?",id); this.run('DELETE FROM nudges WHERE message_id=?',id);
     this.run("UPDATE moderation_actions SET status='done',retry_at=NULL WHERE message_id=?",id);
     for(const a of this.all('SELECT * FROM awards WHERE active=1')) if(JSON.parse(a.evidence).includes(id)) this.run('UPDATE awards SET active=0 WHERE session_id=? AND title=? AND viewer_id=?',a.session_id,a.title,a.viewer_id);
     for(const s of this.all('SELECT * FROM stickers')) if(JSON.parse(s.source_ids).includes(id)) this.run('UPDATE stickers SET approved=0 WHERE id=?',s.id);
@@ -341,7 +342,7 @@ export class Regulars {
   }
   rows(){
     const messages=this.all("SELECT * FROM messages WHERE session_id=? AND moderation='cleared' AND text IS NOT NULL ORDER BY timestamp,id",this.currentSession()?.id || ''),active=new Map(),rows=[];
-    for(const m of messages){const key=repeatKey(m.text,m.parent_id);let row=active.get(key);if(!row || ms(m.timestamp)-row.start>=this.config.repetitionWindowSeconds*1000){row={id:m.id,text:m.text,start:ms(m.timestamp),count:0,authors:{},category:m.category,subjectId:m.subject_id,viewerName:m.name,timestamp:m.timestamp,topicEligible:isTopicMessage(m),selectable:!m.bot && !m.text.startsWith('!') && !m.addresses_ai};rows.push(row);active.set(key,row);}row.count++;row.authors[m.name]=(row.authors[m.name] || 0)+1;}
+    for(const m of messages){const key=repeatKey(m.text,m.parent_id);let row=active.get(key);if(!row || ms(m.timestamp)-row.start>=this.config.repetitionWindowSeconds*1000){row={id:m.id,text:m.text,start:ms(m.timestamp),count:0,authors:{},category:m.category,about:m.about,subjectId:m.subject_id,viewerName:m.name,timestamp:m.timestamp,topicEligible:isTopicMessage(m),selectable:!m.bot && !m.text.startsWith('!') && !m.addresses_ai};rows.push(row);active.set(key,row);}row.count++;row.authors[m.name]=(row.authors[m.name] || 0)+1;}
     return rows;
   }
   async safeGeneratedText(text,identities,signal){
@@ -350,6 +351,31 @@ export class Regulars {
       const result=await this.ai.classify({text,blockedTopics:this.all('SELECT * FROM rules'),subjects:[],identities,organize:true,signal});
       return result.addressesAI<0.7 && !(result.topics || []).some(topic=>topic.score>=this.config.maybeThreshold);
     } catch {return false;}
+  }
+  async labelMessages(){
+    if(this.labelling)return this.labelling;
+    const session=this.currentSession();if(!session || !this.ai.labelMessages)return;
+    const since=new Date(this.now()-subjectWindowMs).toISOString();
+    const targets=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND moderation='cleared' AND text IS NOT NULL AND subject_id IS NULL AND about IS NULL AND COALESCE(received_at,timestamp)>=? ORDER BY COALESCE(received_at,timestamp) DESC,rowid DESC",session.id,since).filter(isTopicMessage).slice(0,30);
+    if(!targets.length)return;
+    const first=Math.min(...targets.map(m=>m.rowid));
+    const earlierChat=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<? AND moderation='cleared' AND text IS NOT NULL ORDER BY rowid DESC",session.id,first).filter(isTopicMessage).slice(0,20).reverse();
+    const existingLabels=this.all("SELECT DISTINCT about FROM messages WHERE session_id=? AND moderation='cleared' AND text IS NOT NULL AND about<>'' AND COALESCE(received_at,timestamp)>=? ORDER BY rowid DESC LIMIT 60",session.id,since).map(m=>m.about);
+    const revision=this.revision,controller=new AbortController();this.modelControllers.add(controller);
+    const valid=()=>revision===this.revision && !controller.signal.aborted && this.currentSession()?.id===session.id;
+    const work=(async()=>{
+      const identities=this.identities();
+      const labels=await this.ai.labelMessages({earlierChat:earlierChat.map(m=>m.text),targets:targets.map(m=>({text:m.text,reply:this.messageContext(m).reply})),existingLabels,identities,signal:controller.signal});
+      if(!valid())return;
+      if(!Array.isArray(labels) || labels.length!==targets.length || labels.some(label=>label!==null && typeof label!=='string'))throw new Error('Invalid message labels response');
+      const unique=[...new Set(labels.filter(label=>label && !isGenericSubjectName(label)))];
+      const allowed=unique.length ? await this.ai.safeLabels({labels:unique,blockedTopics:this.all('SELECT * FROM rules'),identities,threshold:this.config.maybeThreshold,signal:controller.signal}) : [];
+      if(!valid())return;
+      const safe=new Set(unique.filter((_,index)=>allowed[index]===true));
+      for(let i=0;i<targets.length;i++)this.run("UPDATE messages SET about=? WHERE id=? AND session_id=? AND moderation='cleared' AND text IS NOT NULL AND subject_id IS NULL AND about IS NULL",safe.has(labels[i])?labels[i]:'',targets[i].id,session.id);
+    })();
+    this.labelling=work;
+    try{return await work;}finally{this.modelControllers.delete(controller);if(this.labelling===work)this.labelling=null;}
   }
   messageContext(message,maxRowid=Number.MAX_SAFE_INTEGER){
     const before=Math.min(maxRowid,message.rowid-1);
