@@ -538,7 +538,12 @@ joke), never the game, the stream, or a broad theme: "New microphone", not
    not qualify. Compare every scored proposal before assigning ambiguous lines,
    including proposals with fewer than three matches. Only register a new
    proposal if three qualifying messages remain after competition; messages
-   won by unregistered proposals stay ungrouped.
+   won by unregistered proposals stay ungrouped. Retain up to 30 unregistered
+   proposals and their per-message scores in memory for five minutes, so an
+   omitted proposal still competes on its previously scored messages. Clear
+   this evidence on revision changes; do not retain message text in the cache.
+   A weak assignment that loses a direct JEV comparison to a thin proposal
+   returns to Ungrouped even before that proposal can register.
    Reuse existing subject IDs. Keep the messages' original timestamps.
    Reject generic category names; unassigned messages appear in **Ungrouped**
    with a private 1–4 word about label beside the viewer name. Grouped cards

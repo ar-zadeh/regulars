@@ -40,6 +40,84 @@ test('thin proposals protect their messages during discovery and registered-topi
   assert.ok(app.all("SELECT subject_id FROM messages WHERE text NOT LIKE 'Rain sounds%'").every(m=>m.subject_id===null));
 });
 
+test('a thin proposal omitted from the next naming pass still protects discovery and lookback',async t=>{
+  let pass=0,plantChecks=0;
+  const rain={name:'Rain sounds',description:'Rain audible on the microphone.'},plant={name:'Shelf plant',description:'Leaves on the shelf plant.'};
+  const {app,send}=setup(t,{
+    nameSubjects:async()=>++pass===1?[rain,plant]:[rain],
+    scoreSubjects:async({messages,subject})=>{
+      if(subject.name===plant.name)plantChecks++;
+      return messages.map(m=>subject.name===rain.name?0.8:m.text.startsWith('plant')?0.98:0.1);
+    },
+  });
+  for(let i=0;i<3;i++)await send(`rain-${i}`,`rain detail ${i}`,i);
+  for(let i=0;i<2;i++)await send(`plant-${i}`,`plant detail ${i}`,3+i);
+  await app.discover();
+  const checks=plantChecks;
+  app.run("UPDATE messages SET organizer='unassigned' WHERE id='plant-1'");
+  await send('rain-new','rain tapping on the window',15);
+  await send('rain-newer','rain getting louder',16);
+  await app.discover();
+  assert.equal(pass,2);
+  assert.equal(plantChecks,checks);
+  assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE id LIKE 'plant-%' AND subject_id IS NULL").n,2);
+  assert.equal(app.one('SELECT COUNT(*) AS n FROM subjects').n,1);
+  assert.equal(app.topicCandidates.size,1);
+});
+
+test('a thin winner releases weak assignments and registers the same ID after a third message',async t=>{
+  const light={name:'Key light',description:'Light brightness and warmth.'};
+  let pass=0,candidateId;
+  const {app,send}=setup(t,{
+    classify:async()=>({category:'question',addressesAI:0,topics:[],subjects:[{id:'focus',score:0.76}]}),
+    nameSubjects:async({existing})=>{
+      if(++pass===1)return [light,{name:'Camera focus',description:'Autofocus hunting.'}];
+      assert.equal(existing.find(s=>s.name===light.name).id,candidateId);
+      return [{...light,existingId:candidateId}];
+    },
+    scoreSubjects:async({messages,subject})=>messages.map(m=>subject.name===light.name?(m.text.startsWith('light')?0.96:0.1):0.8),
+    chooseSubject:async({subjects})=>subjects.find(s=>s.name===light.name).id,
+  });
+  app.run("INSERT INTO subjects (id,name,description) VALUES ('focus','Camera focus','Autofocus hunting.')");
+  await send('focus','focus is hunting again',0);
+  for(let i=0;i<2;i++)await send(`light-${i}`,`light detail ${i}`,i+1);
+  await app.discover();
+  candidateId=[...app.topicCandidates.keys()][0];
+  assert.ok(candidateId);
+  assert.equal(app.one('SELECT COUNT(*) AS n FROM subjects').n,1);
+  assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE id LIKE 'light-%' AND subject_id IS NULL").n,2);
+  assert.equal(app.one("SELECT subject_id FROM messages WHERE id='focus'").subject_id,'focus');
+  assert.equal(app.one("SELECT last_active FROM subjects WHERE id='focus'").last_active,new Date(start).toISOString());
+  await send('light-2','light colour is warmer now',12);
+  await app.discover();
+  assert.equal(app.one('SELECT COUNT(*) AS n FROM messages WHERE subject_id=?',candidateId).n,3);
+  assert.equal(app.one('SELECT COUNT(*) AS n FROM subjects').n,2);
+  assert.equal(app.topicCandidates.size,0);
+});
+
+test('pending topic evidence expires after five minutes and is cleared on removal',async t=>{
+  let pass=0;
+  const {app,send,advance}=setup(t,{
+    nameSubjects:async()=>++pass===1?[{name:'Shelf plant',description:'Leaves on a shelf plant.'}]:[],
+    scoreSubjects:async({messages})=>messages.map(m=>m.text.startsWith('plant')?0.96:0.1),
+  });
+  await send('plant-0','plant leaves are shiny',0);
+  await send('plant-1','plant has a new leaf',1);
+  await send('other','unrelated kettle question',2);
+  await app.discover();
+  assert.equal(app.topicCandidates.size,1);
+  advance(303);await app.discover();
+  assert.equal(app.topicCandidates.size,0);
+  pass=0;
+  await send('plant-2','plant pot needs drainage',304);
+  await send('plant-3','plant needs more light',305);
+  await send('other-2','unrelated curtain question',306);
+  await app.discover();
+  assert.equal(app.topicCandidates.size,1);
+  app.removeMessage('plant-2');
+  assert.equal(app.topicCandidates.size,0);
+});
+
 test('stored existing-topic scores block a weaker re-proposal in both discovery and lookback',async t=>{
   const {app,send}=setup(t,{
     classify:async({text})=>({category:'question',addressesAI:0,topics:[],subjects:text.startsWith('ramen')?

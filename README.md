@@ -49,6 +49,9 @@ organizer tick, for up to 30 recent ungrouped messages; safety checks are batche
 Quiet chats can accumulate topic evidence for up to five minutes; busy chats
 still retire older candidates after newer messages arrive. Explicit replies
 take precedence over intervening conversation when interpreting short follow-ups.
+Small proposed topics remain competitors for five minutes, so a later naming
+pass cannot absorb their messages just by omitting them. This temporary evidence
+is cleared on privacy changes or restart; topics still need three messages.
 A clearly stronger topic match wins; close ties remain ungrouped unless an
 explicit reply resolves them. Greetings and standalone generic reactions do not
 create topics. Unicode emoji-only messages and Twitch emote-only messages skip

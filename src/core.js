@@ -46,6 +46,7 @@ export class Regulars {
   constructor({ dbPath=':memory:', ai, deleteMessage=null, broadcasterId='broadcaster', now=()=>Date.now(),timeZone='UTC',dayOneDate=undefined,getFollower=null,transientModerationTimeout=2000,config=DEFAULT_SETTINGS }={}) {
     this.db=new DatabaseSync(dbPath); this.ai=ai; this.deleteMessage=deleteMessage || (async()=>{});this.deleteMessageAvailable=!!deleteMessage;this.onPrivacyChange=()=>{}; this.broadcasterId=broadcasterId; this.now=now; this.pending=new Set(); this.naming=null; this.summary=''; this.overlayEvent=null; this.revision=0; this.wrapTask=null; this.transientDeletes=new Set();this.classificationControllers=new Map();this.modelControllers=new Set();this.summaryGeneration=0;this.summaryInFlightKey='';
     this.config=Object.freeze(validateSettings(config));
+    this.topicCandidates=new Map();
     this.timeZone=timeZone;this.dayOneDate=dayOneDate || undefined;this.getFollower=getFollower;this.transientModerationTimeout=transientModerationTimeout;this.followDates={};this.followerChecks=new Map();this.presentIds=null;this.intentionalLurkers=new Set();this.knownIdentities=new Map();this.lastNamingAt=-Infinity;this.lastNamedMessageIds=new Set();this.lastSummaryKey='';
     this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,idx INTEGER NOT NULL,start TEXT NOT NULL,end TEXT,cutoff TEXT,wrapped INTEGER DEFAULT 0,incomplete INTEGER DEFAULT 0);
@@ -284,7 +285,7 @@ export class Regulars {
     const count=(row.retry_count || 0)+1;
     this.run("UPDATE messages SET job_status='failed',retry_count=?,retry_at=? WHERE id=? AND moderation='held' AND text IS NOT NULL",count,count===1?new Date(this.now()+30000).toISOString():null,id);
   }
-  abortClassifications(){for(const controller of this.classificationControllers.values()) controller.abort();for(const controller of this.modelControllers)controller.abort();try{this.onPrivacyChange();}catch{}}
+  abortClassifications(){for(const controller of this.classificationControllers.values()) controller.abort();for(const controller of this.modelControllers)controller.abort();this.topicCandidates.clear();try{this.onPrivacyChange();}catch{}}
   retryHeld(){
     const session=this.currentSession();if(!session) return;
     const rows=this.all("SELECT id FROM messages WHERE session_id=? AND moderation='held' AND job_status='failed' AND retry_count=1 AND retry_at<=? AND text IS NOT NULL ORDER BY retry_at LIMIT 5",session.id,new Date(this.now()).toISOString());
@@ -416,6 +417,11 @@ export class Regulars {
     }
     const fresh=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND moderation='cleared' AND organizer IN ('new','uncertain') AND addresses_ai=0 AND text IS NOT NULL ORDER BY timestamp DESC,rowid DESC LIMIT 60",session.id,maxRowid).filter(isTopicMessage);
     const earliest=new Date(this.now()-subjectWindowMs).toISOString();
+    const recentIds=new Set(this.all('SELECT id FROM messages WHERE session_id=? AND COALESCE(received_at,timestamp)>=?',session.id,earliest).map(m=>m.id));
+    for(const [id,candidate] of this.topicCandidates){
+      if(candidate.lastSeen<this.now()-subjectWindowMs){this.topicCandidates.delete(id);continue;}
+      for(const messageId of candidate.scores.keys())if(!recentIds.has(messageId))candidate.scores.delete(messageId);
+    }
     // A weak early assignment must not hide a new conversation from naming.
     // Keep the normal pool first, and bound reconsideration to recent lines.
     const weak=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND COALESCE(received_at,timestamp)>=? AND moderation='cleared' AND organizer='assigned' AND addresses_ai=0 AND text IS NOT NULL ORDER BY timestamp DESC,rowid DESC LIMIT 60",session.id,maxRowid,earliest).filter(isTopicMessage).filter(m=>{
@@ -429,28 +435,40 @@ export class Regulars {
     const revision=this.revision;
     const controller=new AbortController();this.modelControllers.add(controller);
     this.naming=(async()=>{
-      const identities=this.identities(),existing=this.all('SELECT * FROM subjects');
-      const proposals=await this.ai.nameSubjects({messages:pool.map(m=>m.text),existing,identities,signal:controller.signal});
+      const identities=this.identities(),existing=this.all('SELECT * FROM subjects'),retained=[...this.topicCandidates.values()];
+      const availableSubjects=[...existing,...retained.map(c=>c.subject)];
+      const proposals=await this.ai.nameSubjects({messages:pool.map(m=>m.text),existing:availableSubjects,identities,signal:controller.signal});
       if(revision!==this.revision) return;
       const candidates=[],seen=new Set();
       for(const proposal of (proposals || []).slice(0,3)){
         if(typeof proposal?.name!=='string' || typeof proposal.description!=='string' || !proposal.name.trim() || !proposal.description.trim() || isGenericSubjectName(proposal.name)) continue;
         const key=subjectKey(proposal.name);if(seen.has(key))continue;seen.add(key);
         if(!await this.safeGeneratedText(`${proposal.name}. ${proposal.description}`,identities,controller.signal) || revision!==this.revision) continue;
-        const available=[...candidates.map(c=>c.subject),...existing];
-        let known=existing.find(s=>s.id===proposal.existingId) || available.find(s=>subjectKey(s.name)===key);
+        const available=[...candidates.map(c=>c.subject),...availableSubjects];
+        let reference=availableSubjects.find(s=>s.id===proposal.existingId) || available.find(s=>subjectKey(s.name)===key);
         const alternatives=proposal.existingId===undefined ? available : candidates.map(c=>c.subject);
-        if(!known && alternatives.length && this.ai.existingSubject){
+        if(!reference && alternatives.length && this.ai.existingSubject){
           const id=await this.ai.existingSubject({subject:proposal,existing:alternatives,identities,signal:controller.signal});
           if(revision!==this.revision)return;
-          known=available.find(s=>s.id===id);
+          reference=available.find(s=>s.id===id);
         }
-        if(known && candidates.some(c=>c.subject.id===known.id))continue;
-        const subject={...known,id:known?.id || randomUUID(),name:known && subjectKey(known.name)===key ? known.name : proposal.name.trim().slice(0,100),description:proposal.description.trim().slice(0,300)};
+        if(reference && candidates.some(c=>c.subject.id===reference.id))continue;
+        const subject={...reference,id:reference?.id || randomUUID(),name:reference && subjectKey(reference.name)===key ? reference.name : proposal.name.trim().slice(0,100),description:proposal.description.trim().slice(0,300)};
+        const known=existing.find(s=>s.id===subject.id);
         const scores=await this.scoreConversation(pool,subject,identities,controller.signal,maxRowid);
         if(revision!==this.revision) return;
+        if(!known){
+          const stored=this.topicCandidates.get(subject.id)?.scores || new Map();
+          for(const item of scores){item.score=Math.max(item.score,stored.get(item.m.id) || 0);stored.set(item.m.id,item.score);}
+          this.topicCandidates.set(subject.id,{subject,scores:stored,lastSeen:this.now()});
+        }
         candidates.push({subject,known,scores});
       }
+      // A thin conversation remains a competitor even if Luna omits it in a
+      // later pass. Only reuse its already-scored evidence; do not manufacture
+      // scores for new messages or relax the registration minimum.
+      for(const cached of retained)if(!candidates.some(c=>c.subject.id===cached.subject.id))candidates.push({subject:cached.subject,retained:true,
+        scores:pool.map(m=>({m,score:cached.scores.get(m.id) || 0}))});
       // Compare all proposals before assigning, so proposal order cannot claim
       // an ambiguous message for whichever subject Luna happened to name first.
       const assignments=(messages,options)=>messages.map((m,index)=>{
@@ -478,6 +496,7 @@ export class Regulars {
         const {subject}=candidate;
         if(!candidate.known) this.run('INSERT INTO subjects (id,name,description) VALUES (?,?,?)',subject.id,subject.name,subject.description);
         else this.run('UPDATE subjects SET name=?,description=? WHERE id=?',subject.name,subject.description,subject.id);
+        this.topicCandidates.delete(subject.id);
         registered.push(candidate);
         for(const m of matches){
           if(m.subject_id && m.subject_id!==subject.id)this.run("UPDATE messages SET subject_id=? WHERE id=? AND moderation='cleared' AND subject_id=?",subject.id,m.id,m.subject_id);
@@ -485,12 +504,19 @@ export class Regulars {
         }
         for(const id of new Set([subject.id,...matches.map(m=>m.subject_id).filter(Boolean)]))this.run("UPDATE subjects SET last_active=(SELECT MAX(timestamp) FROM messages WHERE subject_id=? AND moderation='cleared') WHERE id=?",id,id);
       }
+      for(const {m,candidate} of selected)if(m.subject_id && candidate && !candidate.known && !registered.some(c=>c.subject.id===candidate.subject.id)){
+        this.run("UPDATE messages SET subject_id=NULL,organizer='uncertain' WHERE id=? AND subject_id=? AND moderation='cleared'",m.id,m.subject_id);
+        this.run("UPDATE subjects SET last_active=(SELECT MAX(timestamp) FROM messages WHERE subject_id=? AND moderation='cleared') WHERE id=?",m.subject_id,m.subject_id);
+      }
       if(registered.length){
         const lookback=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<=? AND COALESCE(received_at,timestamp)>=? AND moderation='cleared' AND organizer IN ('new','unassigned','uncertain') AND addresses_ai=0 AND text IS NOT NULL ORDER BY timestamp,rowid",session.id,maxRowid,earliest).filter(isTopicMessage);
         const checked=[];
         for(const candidate of candidates){
-          checked.push({...candidate,scores:await this.scoreConversation(lookback,candidate.subject,identities,controller.signal,maxRowid)});
+          const cached=this.topicCandidates.get(candidate.subject.id);
+          const scores=candidate.retained && cached ? lookback.map(m=>({m,score:cached.scores.get(m.id) || 0})) : await this.scoreConversation(lookback,candidate.subject,identities,controller.signal,maxRowid);
           if(revision!==this.revision) return;
+          if(cached)for(const item of scores){item.score=Math.max(item.score,cached.scores.get(item.m.id) || 0);cached.scores.set(item.m.id,item.score);}
+          checked.push({...candidate,scores});
         }
         for(const {m,candidate} of assignments(lookback,checked)) if(candidate && registered.some(c=>c.subject.id===candidate.subject.id)) this.run("UPDATE messages SET organizer='assigned',subject_id=? WHERE id=? AND moderation='cleared' AND text IS NOT NULL AND organizer IN ('new','unassigned','uncertain')",candidate.subject.id,m.id);
         for(const {subject} of registered) this.run("UPDATE subjects SET last_active=(SELECT MAX(timestamp) FROM messages WHERE subject_id=? AND moderation='cleared') WHERE id=?",subject.id,subject.id);
@@ -521,6 +547,7 @@ export class Regulars {
           for(const id of touched)this.run("UPDATE subjects SET last_active=(SELECT MAX(timestamp) FROM messages WHERE subject_id=? AND moderation='cleared') WHERE id=?",id,id);
         }
       }
+      for(const cached of [...this.topicCandidates.values()].sort((a,b)=>b.lastSeen-a.lastSeen).slice(30))this.topicCandidates.delete(cached.subject.id);
       this.lastNamedMessageIds=new Set(pool.map(m=>m.id));
     })();
     const naming=this.naming;
