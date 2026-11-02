@@ -74,6 +74,26 @@ test('commands are moderated and deletion is guarded by sender metadata',async()
   await app.ingest(event('1','!politics','viewer'));await app.ingest({...event('2','politics','mod'),moderator:true});
   assert.equal(app.rows().length,0);assert.deepEqual(deletes,[{messageId:'1',senderId:'viewer',isModerator:false}]);app.close();
 });
+
+test('label migration preserves old labels and failed attempts survive database restart',async()=>{
+  const path=join(tmpdir(),`regulars-label-migration-${randomUUID()}.sqlite`);
+  const model={...ai,labelMessages:async()=>[],safeLabels:async()=>[]};let app;
+  try{
+    app=new Regulars({dbPath:path,ai:model});app.startSession();
+    await app.ingest(event('old','What microphone?'));
+    app.run("UPDATE messages SET about='Microphone' WHERE id='old'");
+    app.db.exec('ALTER TABLE messages DROP COLUMN label_attempts');app.close();
+    app=new Regulars({dbPath:path,ai:model});
+    assert.deepEqual({...app.one("SELECT about,label_attempts FROM messages WHERE id='old'")},{about:'Microphone',label_attempts:0});
+    await app.ingest(event('failed','Which tea?'));
+    await assert.rejects(app.labelMessages(),/Invalid message labels/);
+    await assert.rejects(app.labelMessages(),/Invalid message labels/);
+    app.close();app=new Regulars({dbPath:path,ai:model});
+    assert.equal(app.one("SELECT label_attempts FROM messages WHERE id='failed'").label_attempts,2);
+    assert.equal(app.one("SELECT about FROM messages WHERE id='failed'").about,null);
+    assert.equal(app.labelTargets().length,0);
+  }finally{app?.close();unlinkSync(path);}
+});
 test('failed Twitch deletion retries once without repeating a successful action',async()=>{
   let now=1700000100000,calls=0;
   const app=new Regulars({ai,now:()=>now,deleteMessage:async()=>{calls++;if(calls===1)throw new Error('Twitch unavailable');return true;}});app.startSession();app.addRule({name:'politics',action:'delete'});

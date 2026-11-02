@@ -10,7 +10,7 @@ export class ChatReplay {
     this.startTime=Date.parse(recording.startedAt);
     this.status='ready';this.speed=1;this.offset=0;this.anchor=now();this.next=0;
     this.timer=null;this.tasks=new Set();this.generation=0;this.backgroundBusy=false;
-    this.lastOrganizer=-10000;this.lastSummary=-Infinity;this.error='';this.resetting=null;this.closed=false;
+    this.lastOrganizer=-10000;this.lastSummary=-Infinity;this.lastLabels=-Infinity;this.error='';this.resetting=null;this.closed=false;
     app.now=()=>this.startTime+this.elapsed();
   }
   elapsed(){return this.offset+(RUNNING.has(this.status)?Math.max(0,this.now()-this.anchor)*this.speed:0);}
@@ -55,10 +55,10 @@ export class ChatReplay {
     this.background(elapsed);
     if(this.next===messages.length){
       this.status='processing';
-      // Allow the normal discovery pass and durable failed-classification retry
-      // to run after the last arrival, using the same simulated clock.
+      // Drain eligible label batches and allow the normal discovery pass and
+      // durable classification retry after the last arrival on the same clock.
       const retry=this.app.one("SELECT 1 FROM messages WHERE moderation='held' AND job_status='failed' AND retry_count=1 AND retry_at IS NOT NULL LIMIT 1");
-      if(elapsed>=this.recording.durationMs+10000 && !this.tasks.size && !this.app.pending.size && !retry){
+      if(elapsed>=this.recording.durationMs+10000 && !this.tasks.size && !this.app.pending.size && !retry && !this.app.labelTargets(1).length){
         this.freeze();this.status='completed';return;
       }
     }
@@ -67,6 +67,10 @@ export class ChatReplay {
     this.timer?.unref?.();
   }
   background(elapsed){
+    if(!this.app.labelling && elapsed-this.lastLabels>=10000){
+      this.lastLabels=elapsed;
+      this.track(this.app.labelMessages(),'Message labelling failed. Check the AI configuration.');
+    }
     if(this.backgroundBusy) return;
     const organizerDue=elapsed-this.lastOrganizer>=10000;
     const summaryDue=elapsed-this.lastSummary>=this.app.config.summaryIntervalSeconds*1000;
@@ -79,7 +83,6 @@ export class ChatReplay {
       if(organizerDue){
         this.app.retryHeld();
         try{await this.app.discover();}catch{if(generation===this.generation)this.error='Topic discovery failed. Check the AI configuration.';}
-        if(generation===this.generation && !this.closed){try{await this.app.labelMessages();}catch{if(generation===this.generation)this.error='Message labelling failed. Check the AI configuration.';}}
       }
       if(generation!==this.generation || this.closed) return;
       if(summaryDue){try{await this.app.refreshSummary();}catch{if(generation===this.generation)this.error='The chat summary could not be updated.';}}
@@ -99,11 +102,11 @@ export class ChatReplay {
       DELETE FROM moderation_actions;DELETE FROM messages;DELETE FROM subjects;DELETE FROM viewers;
       DELETE FROM events;DELETE FROM sessions;`);
     this.app.summary='';this.app.overlayEvent=null;this.app.presentIds=null;
-    this.next=0;this.offset=0;this.anchor=this.now();this.lastOrganizer=-10000;this.lastSummary=-Infinity;
+    this.next=0;this.offset=0;this.anchor=this.now();this.lastOrganizer=-10000;this.lastSummary=-Infinity;this.lastLabels=-Infinity;
     this.error='';this.status='ready';
   }
   results(){
-    const rows=new Map(this.app.all('SELECT m.id,m.category,m.about,m.moderation,m.organizer,s.name AS topic FROM messages m LEFT JOIN subjects s ON s.id=m.subject_id').map(m=>[m.id,m]));
+    const rows=new Map(this.app.all('SELECT m.id,m.category,m.about,m.label_attempts AS labelAttempts,m.moderation,m.organizer,s.name AS topic FROM messages m LEFT JOIN subjects s ON s.id=m.subject_id').map(m=>[m.id,m]));
     return {recording:this.recording.name,status:this.status,speed:this.speed,settings:this.app.config,
       messages:this.recording.messages.map(m=>({id:m.id,name:m.name,text:m.text,timestamp:m.timestamp,
         receivedAt:m.receivedAt,offsetMs:m.offsetMs,delayMs:m.delayMs,recordedCategory:m.category ?? m.previousResult?.category ?? null,previousResult:m.previousResult || null,

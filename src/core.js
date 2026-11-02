@@ -4,6 +4,7 @@ import { computeLoyalty } from './loyalty.js';
 import { createSanitizer, isGenericSubjectName } from './ai.js';
 import { DEFAULT_SETTINGS, validateSettings } from './config.js';
 import { isEmojiOnly } from './emoji.js';
+import { isKnownBot } from './chat-bots.js';
 const reactions = new Set(['lol','lmao','gg','w','pog','poggers','haha','kekw']);
 const ms = value => new Date(value).getTime();
 const nudgePriority = {arrival:1,message:2,return:3,question:4};
@@ -68,6 +69,7 @@ export class Regulars {
     if(!this.all('PRAGMA table_info(messages)').some(c=>c.name==='received_at')) this.db.exec('ALTER TABLE messages ADD COLUMN received_at TEXT');
     const messageColumns=this.all('PRAGMA table_info(messages)').map(c=>c.name);
     if(!messageColumns.includes('about')) this.db.exec('ALTER TABLE messages ADD COLUMN about TEXT');
+    if(!messageColumns.includes('label_attempts')) this.db.exec('ALTER TABLE messages ADD COLUMN label_attempts INTEGER NOT NULL DEFAULT 0');
     if(!messageColumns.includes('subject_scores')) this.db.exec("ALTER TABLE messages ADD COLUMN subject_scores TEXT NOT NULL DEFAULT '[]'");
     if(!messageColumns.includes('job_status')) this.db.exec('ALTER TABLE messages ADD COLUMN job_status TEXT');
     if(!messageColumns.includes('retry_at')) this.db.exec('ALTER TABLE messages ADD COLUMN retry_at TEXT');
@@ -218,7 +220,7 @@ export class Regulars {
       return;
     }
     const command=text.startsWith('!'), reaction=isReaction(text) || !!event.reaction;
-    const bot=!!event.bot || event.viewerId===this.broadcasterId || !!event.shared;
+    const bot=!!event.bot || isKnownBot(event.login,event.name) || event.viewerId===this.broadcasterId || !!event.shared;
     this.knownIdentities.set(event.viewerId,{id:event.viewerId,name:event.name,login:event.login});
     this.sight({id:event.viewerId,name:event.name,login:event.login,bot},session);
     const timestamp=event.timestamp || new Date(this.now()).toISOString(); if(!Number.isFinite(ms(timestamp))) throw new Error('Invalid message timestamp.');
@@ -231,8 +233,16 @@ export class Regulars {
     const subjects=m.organizer==='reaction' ? [] : this.all('SELECT * FROM subjects ORDER BY last_active DESC LIMIT 30').map(subject=>({...subject,recent:this.all("SELECT text FROM messages WHERE subject_id=? AND moderation='cleared' AND text IS NOT NULL AND timestamp<=? ORDER BY timestamp DESC LIMIT 2",subject.id,m.timestamp).filter(row=>!isEmojiOnly(row.text)).reverse().map(row=>row.text)}));
     const context=this.messageContext(m);
     const parent=m.parent_id ? this.one("SELECT subject_id FROM messages WHERE id=? AND session_id=? AND moderation='cleared'",m.parent_id,m.session_id) : null;
-    let result;const controller=new AbortController();this.classificationControllers.set(id,controller);
-    try{result=await this.ai.classify({text:m.text,context,blockedTopics:rules,subjects,organize:m.organizer!=='reaction',identities:this.identities(),signal:controller.signal});}
+    let result,replyChoice;const controller=new AbortController();this.classificationControllers.set(id,controller);
+    try{
+      result=await this.ai.classify({text:m.text,context,blockedTopics:rules,subjects,organize:m.organizer!=='reaction',identities:this.identities(),signal:controller.signal});
+      const selected=chooseSubject(result.subjects || [],this.config.matchThreshold,parent?.subject_id);
+      const replySubject=subjects.find(s=>s.id===parent?.subject_id);
+      if(m.organizer!=='reaction' && result.addressesAI<0.7 && this.ai.chooseSubject && replySubject && selected && selected.id!==replySubject.id && (result.subjects || []).some(s=>s.id===replySubject.id && s.score>=this.config.matchThreshold)){
+        const choices=[replySubject,subjects.find(s=>s.id===selected.id)].filter(Boolean);
+        replyChoice={id:await this.ai.chooseSubject({text:m.text,context,subjects:choices,identities:this.identities(),signal:controller.signal})};
+      }
+    }
     catch{
       const current=this.one('SELECT text,moderation FROM messages WHERE id=?',id);
       if(controller.signal.aborted && revision!==this.revision && current?.text && current.moderation==='held' && this.currentSession()?.id===m.session_id && attempt<2) return this.processMessage(id,this.all('SELECT * FROM rules'),attempt+1);
@@ -261,11 +271,12 @@ export class Regulars {
     if(organizer!=='reaction' && addressesAI) organizer='unassigned';
     else if(organizer!=='reaction'){
       const scores=(result.subjects || []).filter(s=>s.score>=maybeThreshold);
-      const selected=chooseSubject(scores,matchThreshold,parent?.subject_id);
+      const selected=replyChoice ? scores.find(s=>s.id===replyChoice.id) : chooseSubject(scores,matchThreshold,parent?.subject_id);
       if(selected){organizer='assigned';subjectId=selected.id;}
       else if(scores.length) organizer='uncertain';
     }
-    this.run('UPDATE messages SET moderation=?,organizer=?,category=?,subject_id=?,addresses_ai=? WHERE id=?','cleared',organizer,result.category || 'other',subjectId,addressesAI?1:0,id);
+    const category=m.organizer==='reaction' && !m.bot && !m.text.startsWith('!') ? 'reaction' : result.category || 'other';
+    this.run('UPDATE messages SET moderation=?,organizer=?,category=?,subject_id=?,addresses_ai=? WHERE id=?','cleared',organizer,category,subjectId,addressesAI?1:0,id);
     if(/^!lurk\s*$/i.test(m.text) && !m.bot && this.currentSession()?.id===m.session_id){
       this.intentionalLurkers.add(m.viewer_id);
       this.run("UPDATE nudges SET text=? WHERE viewer_id=? AND session_id=? AND status IN ('open','waiting')",`${m.name} has chosen to lurk.`,m.viewer_id,m.session_id);
@@ -355,15 +366,20 @@ export class Regulars {
       return result.addressesAI<0.7 && !(result.topics || []).some(topic=>topic.score>=this.config.maybeThreshold);
     } catch {return false;}
   }
+  labelTargets(limit=30){
+    const session=this.currentSession();if(!session || !this.ai.labelMessages)return [];
+    // Keep the queue independent of the topic-discovery window. Otherwise a busy
+    // chat can permanently strand its oldest messages before they are labelled.
+    return this.all("SELECT rowid,* FROM messages WHERE session_id=? AND moderation='cleared' AND text IS NOT NULL AND subject_id IS NULL AND about IS NULL AND label_attempts<2 AND bot=0 AND addresses_ai=0 AND organizer<>'reaction' AND text NOT LIKE '!%' ORDER BY COALESCE(received_at,timestamp),rowid",session.id).filter(isTopicMessage).slice(0,limit);
+  }
   async labelMessages(){
     if(this.labelling)return this.labelling;
     const session=this.currentSession();if(!session || !this.ai.labelMessages)return;
-    const since=new Date(this.now()-subjectWindowMs).toISOString();
-    const targets=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND moderation='cleared' AND text IS NOT NULL AND subject_id IS NULL AND about IS NULL AND COALESCE(received_at,timestamp)>=? ORDER BY COALESCE(received_at,timestamp) DESC,rowid DESC",session.id,since).filter(isTopicMessage).slice(0,30);
+    const targets=this.labelTargets();
     if(!targets.length)return;
     const first=Math.min(...targets.map(m=>m.rowid));
     const earlierChat=this.all("SELECT rowid,* FROM messages WHERE session_id=? AND rowid<? AND moderation='cleared' AND text IS NOT NULL ORDER BY rowid DESC",session.id,first).filter(isTopicMessage).slice(0,20).reverse();
-    const existingLabels=this.all("SELECT DISTINCT about FROM messages WHERE session_id=? AND moderation='cleared' AND text IS NOT NULL AND about<>'' AND COALESCE(received_at,timestamp)>=? ORDER BY rowid DESC LIMIT 60",session.id,since).map(m=>m.about);
+    const existingLabels=this.all("SELECT DISTINCT about FROM messages WHERE session_id=? AND rowid<? AND moderation='cleared' AND text IS NOT NULL AND about<>'' ORDER BY rowid DESC LIMIT 60",session.id,first).map(m=>m.about);
     const revision=this.revision,controller=new AbortController();this.modelControllers.add(controller);
     const valid=()=>revision===this.revision && !controller.signal.aborted && this.currentSession()?.id===session.id;
     const work=(async()=>{
@@ -375,10 +391,15 @@ export class Regulars {
       const allowed=unique.length ? await this.ai.safeLabels({labels:unique,blockedTopics:this.all('SELECT * FROM rules'),identities,threshold:this.config.maybeThreshold,signal:controller.signal}) : [];
       if(!valid())return;
       const safe=new Set(unique.filter((_,index)=>allowed[index]===true));
-      for(let i=0;i<targets.length;i++)this.run("UPDATE messages SET about=? WHERE id=? AND session_id=? AND moderation='cleared' AND text IS NOT NULL AND subject_id IS NULL AND about IS NULL",safe.has(labels[i])?labels[i]:'',targets[i].id,session.id);
+      for(let i=0;i<targets.length;i++)this.run("UPDATE messages SET about=?,label_attempts=0 WHERE id=? AND session_id=? AND moderation='cleared' AND text IS NOT NULL AND subject_id IS NULL AND about IS NULL",safe.has(labels[i])?labels[i]:'',targets[i].id,session.id);
     })();
-    this.labelling=work;
-    try{return await work;}finally{this.modelControllers.delete(controller);if(this.labelling===work)this.labelling=null;}
+    this.labelling=work;this.pending.add(work);
+    try{return await work;}catch(error){
+      // Failed output stays distinguishable from an intentional empty label.
+      // After one retry, let later batches proceed instead of blocking the queue.
+      if(valid())for(const target of targets)this.run("UPDATE messages SET label_attempts=label_attempts+1 WHERE id=? AND session_id=? AND moderation='cleared' AND text IS NOT NULL AND subject_id IS NULL AND about IS NULL",target.id,session.id);
+      throw error;
+    }finally{this.pending.delete(work);this.modelControllers.delete(controller);if(this.labelling===work)this.labelling=null;}
   }
   messageContext(message,maxRowid=Number.MAX_SAFE_INTEGER){
     const before=Math.min(maxRowid,message.rowid-1);
@@ -446,11 +467,34 @@ export class Regulars {
         if(!await this.safeGeneratedText(`${proposal.name}. ${proposal.description}`,identities,controller.signal) || revision!==this.revision) continue;
         const available=[...candidates.map(c=>c.subject),...availableSubjects];
         let reference=availableSubjects.find(s=>s.id===proposal.existingId) || available.find(s=>subjectKey(s.name)===key);
+        const namedReference=reference;
+        // A naming model's reuse index is a proposal, not proof of identity.
+        // Check it independently before allowing it to rename an existing group.
+        if(reference && this.ai.existingSubject){
+          const id=await this.ai.existingSubject({subject:proposal,existing:[reference],identities,signal:controller.signal});
+          if(revision!==this.revision)return;
+          if(id!==reference.id)reference=undefined;
+        }
         const alternatives=proposal.existingId===undefined ? available : candidates.map(c=>c.subject);
-        if(!reference && alternatives.length && this.ai.existingSubject){
+        if(!reference && !namedReference && proposal.existingId===undefined && alternatives.length && this.ai.existingSubject){
           const id=await this.ai.existingSubject({subject:proposal,existing:alternatives,identities,signal:controller.signal});
           if(revision!==this.revision)return;
           reference=available.find(s=>s.id===id);
+        }
+        if(!reference && namedReference && subjectKey(namedReference.name)===key)continue;
+        if(reference && (reference.name!==proposal.name || reference.description!==proposal.description)){
+          // Protect both the opening and the current meaning, even after the
+          // opening messages have left the five-minute discovery window.
+          const evidence=order=>this.all(`SELECT rowid,* FROM messages WHERE subject_id=? AND rowid<=? AND moderation='cleared' AND text IS NOT NULL AND bot=0 AND addresses_ai=0 AND organizer='assigned' ORDER BY rowid ${order} LIMIT 3`,reference.id,maxRowid);
+          const anchors=[...new Map([...evidence('ASC'),...evidence('DESC')].filter(isTopicMessage).map(m=>[m.id,m])).values()];
+          if(anchors.length){
+            const checked=await this.scoreConversation(anchors,proposal,identities,controller.signal,maxRowid);
+            if(revision!==this.revision)return;
+            if(checked.some(item=>item.score<this.config.matchThreshold)){
+              if(subjectKey(reference.name)===key)continue;
+              reference=undefined;
+            }
+          }
         }
         if(reference && candidates.some(c=>c.subject.id===reference.id))continue;
         const subject={...reference,id:reference?.id || randomUUID(),name:reference && subjectKey(reference.name)===key ? reference.name : proposal.name.trim().slice(0,100),description:proposal.description.trim().slice(0,300)};

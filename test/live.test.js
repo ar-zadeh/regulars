@@ -324,6 +324,7 @@ test('default and configured bots receive topic checks but no presence or award 
     clientFactory: o => (options = o, {
       start() {}, stop() {}, getChatters: async () => [
         {user_id: 'default', user_login: 'nightbot', user_name: 'Nightbot'},
+        {user_id: 'streamlabs', user_login: 'streamlabs', user_name: 'Streamlabs'},
         {user_id: 'custom', user_login: 'custombot', user_name: 'CustomBot'},
         {user_id: 'person', user_login: 'person', user_name: 'Person'},
       ], deleteMessage: async () => true,
@@ -342,11 +343,14 @@ test('default and configured bots receive topic checks but no presence or award 
   });
   await send('one', 'default', 'nightbot', 'Nightbot', 'blocked topic');
   await send('two', 'custom', 'custombot', 'CustomBot', 'ordinary message');
-  assert.deepEqual(checks.map(check => check.organize), [false, false]);
+  await send('three', 'streamlabs', 'streamlabs', 'Streamlabs', 'support the stream');
+  assert.deepEqual(checks.map(check => check.organize), [false, false, false]);
   assert.equal(app.one("SELECT moderation FROM messages WHERE id='one'").moderation, 'hidden');
   assert.equal(app.one("SELECT bot FROM messages WHERE id='two'").bot, 1);
   assert.equal(app.one("SELECT organizer FROM messages WHERE id='two'").organizer, 'reaction');
   assert.equal(app.one("SELECT id FROM viewers WHERE id='custom'"), undefined);
+  assert.equal(app.one("SELECT id FROM viewers WHERE id='streamlabs'"), undefined);
+  assert.equal(app.one("SELECT bot FROM messages WHERE id='three'").bot,1);
   await app.wrap({play: false});
   assert.deepEqual(app.awards(), []);
   bridge.stop();

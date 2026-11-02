@@ -78,6 +78,47 @@ test('replay preserves recorded emote-only eligibility',async t=>{
   replay.recording.messages[0].text='CustomWave';replay.recording.messages[0].reaction=true;
   await replay.play();await settle();
   assert.equal(app.one("SELECT organizer FROM messages WHERE id='m0'").organizer,'reaction');
+  assert.equal(app.one("SELECT category FROM messages WHERE id='m0'").category,'reaction');
+});
+
+test('labels run while discovery is waiting and replay drains every label batch before completing',async t=>{
+  const {clock,replay,app}=setup(t);
+  let release;
+  const blocked=new Promise(resolve=>{release=resolve;});
+  app.discover=()=>blocked;
+  app.ai.labelMessages=async({targets})=>targets.map(()=> 'Tea choice');
+  app.ai.safeLabels=async({labels})=>labels.map(()=>true);
+  const original=fixture().messages[0];
+  replay.recording.messages=Array.from({length:65},(_,i)=>({...original,id:`m${i}`,viewerId:`v${i}`,text:`Which tea ${i}?`,offsetMs:0,delayMs:0}));
+  replay.recording.durationMs=0;
+  try{
+    await replay.play();await clock.advance(10000);
+    assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE about='Tea choice'").n,30);
+    assert.notEqual(replay.status,'completed');
+    await clock.advance(10000);
+    assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE about='Tea choice'").n,60);
+    release();await clock.advance(10000);
+    assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE about='Tea choice'").n,65);
+    await clock.advance(1000);assert.equal(replay.status,'completed');
+  }finally{release();await settle();}
+});
+
+test('replay identifies known bots even when a recording did not mark them',async t=>{
+  const {replay,app}=setup(t);
+  Object.assign(replay.recording.messages[0],{name:'Streamlabs',login:'streamlabs',bot:false});
+  await replay.play();await settle();
+  assert.equal(app.one("SELECT bot FROM messages WHERE id='m0'").bot,1);
+  assert.equal(app.one("SELECT id FROM viewers WHERE id='viewer0'"),undefined);
+});
+
+test('replay completes with explicit label failures after the bounded retry',async t=>{
+  const {replay,app,clock}=setup(t);
+  app.ai.labelMessages=async()=>[];
+  app.ai.safeLabels=async()=>[];
+  await replay.play();await clock.advance(22000);
+  assert.equal(replay.status,'completed');
+  assert.ok(replay.results().messages.every(m=>m.result.labelAttempts===2 && m.result.about===null));
+  assert.match(replay.error,/labelling failed/);
 });
 
 test('pause, resume and speed changes preserve the remaining interval without duplicates',async t=>{

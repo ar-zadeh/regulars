@@ -1,6 +1,7 @@
 import { TwitchClient, validateAccessToken } from './twitch.js';
 import { StickerQueue } from './sticker-queue.js';
 import { isEmojiOnly } from './emoji.js';
+import { DEFAULT_BOT_NAMES } from './chat-bots.js';
 
 // The bridge is opt-in and keeps the broadcaster token in memory only.
 export async function connectLive({
@@ -9,7 +10,7 @@ export async function connectLive({
   pollMs, offlineMs = 600000, validationMs = 3600000, botNames = [],
 } = {}) {
   await validate({ clientId, accessToken, userId: broadcasterId });
-  const bots = new Set(['nightbot', 'streamelements', 'moobot', 'commanderroot', 'sery_bot', ...botNames]
+  const bots = new Set([...DEFAULT_BOT_NAMES, ...botNames]
     .map(name => String(name).trim().toLowerCase()).filter(Boolean));
   const isBot = (login, name) => bots.has(String(login || '').trim().toLowerCase()) ||
     bots.has(String(name || '').trim().toLowerCase());

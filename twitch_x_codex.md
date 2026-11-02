@@ -532,7 +532,11 @@ joke), never the game, the stream, or a broad theme: "New microphone", not
    names, and proposes up to 3 subjects, each either new (a name and a
    one-sentence description) or an existing one identified by its supplied
    index. Another aspect of the same event reuses that index and broadens the
-   existing name and description. Jev checks each pool message
+   existing name and description. Jev independently verifies a proposed reuse
+   index. Before changing a stored name or description, score up to three
+   opening and three latest retained messages against the proposal, including
+   older openings outside the discovery window. A proposal that does not cover
+   that evidence cannot overwrite the existing conversation. Jev checks each pool message
    against each proposal with the step-2 Noul, in bounded batches. A new
    proposal is registered only if 3 messages confidently belong to it. One
    viewer can start a subject with 3 distinct lines; repeating one line does
@@ -550,10 +554,16 @@ joke), never the game, the stream, or a broad theme: "New microphone", not
    with a private 1–4 word about label beside the viewer name. Grouped cards
    show no extra label. Community reminders and sticker selection use the
    linked message's topic name, then about label, then nothing. Offline mode
-   produces neither topic names nor labels. After discovery, each organizer
-   tick makes at most one Luna labelling call for the newest 30 cleared,
-   readable, ungrouped messages from the last 5 minutes with no label yet.
-   Include up to 20 earlier readable lines, replies, and labels already in use.
+   produces neither topic names nor labels. Labelling runs independently of
+   discovery, one batch at a time, on a ten-second cadence. Select the oldest
+   30 cleared, readable, ungrouped messages with no label yet from the open
+   session. Do not age this queue out after five minutes. Include up to 20
+   earlier readable lines, replies, and labels from preceding messages only.
+   Retry malformed or truncated structured output once with more output space.
+   A failed batch gets one later retry; persist the attempt count so restart
+   does not reset that allowance. Keep failed labels null and let later work
+   proceed after the second failure. Replay drains eligible label batches before
+   completing and exports the attempt count separately from the about label.
    Store an empty string for no subject so greetings and generic reactions
    are not retried. Batch safety checks, discard blocked or instructional
    labels, abort on revision changes, and clear labels when text is removed

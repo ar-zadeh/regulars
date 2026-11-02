@@ -36,6 +36,32 @@ test('offline labels are null and live labels use low reasoning Luna', async () 
   assert.equal(request.reasoning.effort,'low');
 });
 
+test('malformed structured output retries once with more space and preserves label order',async()=>{
+  const requests=[];
+  const ai=createAI({apiKey:'test',retries:0,fetchImpl:async(_url,options)=>{
+    const body=JSON.parse(options.body);requests.push(body);
+    return response({choices:[{message:{content:requests.length===1?'["Tea':'["Tea choice",null]'},finish_reason:requests.length===1?'length':'stop'}]});
+  }});
+  assert.deepEqual(await ai.labelMessages({targets:['Which tea?','hello']}),['Tea choice',null]);
+  assert.equal(requests.length,2);
+  assert.ok(requests[0].max_tokens>500);
+  assert.equal(requests[1].max_tokens,requests[0].max_tokens*2);
+  assert.deepEqual(requests[1].messages,requests[0].messages);
+});
+
+test('topic naming recovers from an empty response but does not retry transport errors as malformed output',async()=>{
+  let calls=0;
+  const ai=createAI({apiKey:'test',retries:0,fetchImpl:async()=>{
+    calls++;return response({choices:[{message:{content:calls===1?'':'[{"name":"Tea choice","description":"Choosing a tea."}]'}}]});
+  }});
+  assert.equal((await ai.nameSubjects({messages:['tea','black tea','green tea']}))[0].name,'Tea choice');
+  assert.equal(calls,2);
+  let failures=0;
+  const unavailable=createAI({apiKey:'test',retries:0,fetchImpl:async()=>{failures++;return {ok:false,status:503};}});
+  await assert.rejects(unavailable.labelMessages({targets:['Which tea?']}),/503/);
+  assert.equal(failures,1);
+});
+
 test('label safety checks a burst in one decision batch', async () => {
   const calls=[];
   const ai=createAI({apiKey:'test',fetchImpl:async(_url,options)=>{

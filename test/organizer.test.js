@@ -215,16 +215,54 @@ test('broadening an existing topic rechecks recent assignments without creating 
   assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE subject_id='light'").n,3);
 });
 
-test('an explicit naming reference broadens the existing topic even when names differ',async t=>{
+test('an explicit naming reference is independently checked before broadening an existing topic',async t=>{
+  let comparisons=0;
   const {app,send}=setup(t,{
     nameSubjects:async()=>[{name:'Lighting setup',description:'Light placement, brightness and warmth.',existingId:'light'}],
-    existingSubject:async()=>{throw new Error('Explicit reuse should not need another comparison');},scoreSubject:async()=>0.95,
+    existingSubject:async({existing})=>{comparisons++;assert.equal(existing.length,1);return 'light';},scoreSubject:async()=>0.95,
   });
   app.run("INSERT INTO subjects (id,name,description) VALUES ('light','Lamp brightness','A bright lamp.')");
   for(let i=0;i<3;i++)await send(String(i),`light detail ${i}`,i);
   await app.discover();
   assert.equal(app.one('SELECT COUNT(*) AS n FROM subjects').n,1);
   assert.equal(app.one("SELECT name FROM subjects WHERE id='light'").name,'Lighting setup');
+  assert.equal(comparisons,1);
+});
+
+for(const comparison of [null,'video'])test(`unrelated topic reuse preserves old messages when comparison returns ${comparison}`,async t=>{
+  const {app,send}=setup(t,{
+    classify:async({text})=>({category:'opinion',addressesAI:0,topics:[],subjects:text.startsWith('video')?[{id:'video',score:0.95}]:[]}),
+    nameSubjects:async()=>[{name:'Choosing a pet',description:'Choosing between a cat and a dog.',existingId:'video'}],
+    existingSubject:async()=>comparison,
+    scoreSubjects:async({messages,subject})=>messages.map(m=>subject.name==='Choosing a pet' && m.text.startsWith('pet')?0.95:0.1),
+    chooseSubject:async()=>null,
+  });
+  app.run("INSERT INTO subjects (id,name,description) VALUES ('video','Music video editing','Cuts and transitions in a music video.')");
+  for(let i=0;i<3;i++)await send(`video-${i}`,`video transition ${i}`,i);
+  for(let i=0;i<3;i++)await send(`pet-${i}`,`pet choice ${i}`,700+i);
+  await app.discover();
+  assert.equal(app.one("SELECT name FROM subjects WHERE id='video'").name,'Music video editing');
+  assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE subject_id='video'").n,3);
+  const pet=app.one("SELECT id FROM subjects WHERE name='Choosing a pet'");
+  assert.ok(pet);assert.notEqual(pet.id,'video');
+  assert.equal(app.one('SELECT COUNT(*) AS n FROM messages WHERE subject_id=?',pet.id).n,3);
+});
+
+test('a legitimate broader description retains the original topic and all its opening evidence',async t=>{
+  const {app,send}=setup(t,{
+    classify:async({text})=>({category:'opinion',addressesAI:0,topics:[],subjects:text.startsWith('lamp')?[{id:'light',score:0.95}]:[]}),
+    nameSubjects:async()=>[{name:'Lighting setup',description:'Lamp brightness, placement and warmth.',existingId:'light'}],
+    existingSubject:async()=> 'light',scoreSubject:async()=>0.95,
+  });
+  app.run("INSERT INTO subjects (id,name,description) VALUES ('light','Lamp brightness','A bright lamp.')");
+  for(let i=0;i<3;i++)await send(`lamp-${i}`,`lamp brightness ${i}`,i);
+  for(let i=0;i<3;i++)await send(`position-${i}`,`lamp placement ${i}`,700+i);
+  // Give discovery new, unassigned evidence while preserving the old anchors.
+  app.run("UPDATE messages SET subject_id=NULL,organizer='new' WHERE id LIKE 'position-%'");
+  await app.discover();
+  assert.equal(app.one('SELECT COUNT(*) AS n FROM subjects').n,1);
+  assert.equal(app.one("SELECT name FROM subjects WHERE id='light'").name,'Lighting setup');
+  assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE subject_id='light'").n,6);
 });
 
 test('emoji-only messages need no topic model calls while a text reaction with emojis participates',async t=>{
@@ -319,6 +357,22 @@ test('a short reply from another viewer joins the person being discussed',async 
   assert.equal(subject.name,'Bori announcement');
   assert.equal(app.one("SELECT subject_id FROM messages WHERE id='reply'").subject_id,subject.id);
   assert.equal(app.one("SELECT subject_id FROM messages WHERE id='unrelated'").subject_id,null);
+});
+
+for(const winner of ['vase','lamp'])test(`an explicit reply compares competing conversations and can select ${winner}`,async t=>{
+  let comparisons=0;
+  const {app,send}=setup(t,{
+    classify:async({text})=>({category:'opinion',addressesAI:0,topics:[],subjects:text==='A glass vase'?[{id:'vase',score:0.98}]:[{id:'vase',score:0.75},{id:'lamp',score:0.98}]}),
+    chooseSubject:async({context,subjects})=>{
+      comparisons++;assert.equal(context.reply,'A glass vase');
+      assert.deepEqual(subjects.map(s=>s.id),['vase','lamp']);return winner;
+    },
+  });
+  app.run("INSERT INTO subjects (id,name,description) VALUES ('vase','Glass vase','A glass vase.'),('lamp','Desk lamp','A desk lamp.')");
+  await send('parent','A glass vase',0);
+  await send('reply','The shape is unusual',1,'two',{parentId:'parent'});
+  assert.equal(comparisons,1);
+  assert.equal(app.one("SELECT subject_id FROM messages WHERE id='reply'").subject_id,winner);
 });
 
 test('lookback uses the original conversation context for earlier unassigned replies',async t=>{

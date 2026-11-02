@@ -72,18 +72,22 @@ app.dayOneDate=app.one("SELECT value FROM settings WHERE key='dayOneDate'")?.val
 expireChatText(app);
 // Sweep every minute so closed-session chat text expires within about a minute of the 24-hour deadline.
 const retentionTimer=setInterval(()=>expireChatText(app),60*1000);retentionTimer.unref?.();
-let organizerBusy=false,lastOrganizerTick=0,lastSummaryTick=0;
+let organizerBusy=false,lastOrganizerTick=0,lastSummaryTick=0,lastLabelTick=0;
 const organizerTimer=setInterval(async()=>{
   if(recording) return;
+  const now=Date.now();
+  if(app.currentSession() && !replaying && !app.labelling && now-lastLabelTick>=10000){
+    lastLabelTick=now;app.labelMessages().catch(()=>{});
+  }
   if(organizerBusy) return;
-  const now=Date.now(),organizerDue=now-lastOrganizerTick>=10000;
+  const organizerDue=now-lastOrganizerTick>=10000;
   if(organizerDue){lastOrganizerTick=now;try{app.retryDeletes();}catch{}}
   if(!app.currentSession() || replaying){lastSummaryTick=0;return;}
   const summaryDue=now-lastSummaryTick>=app.config.summaryIntervalSeconds*1000;
   if(!organizerDue && !summaryDue) return;
   organizerBusy=true;
   try{
-    if(organizerDue){try{app.retryHeld();}catch{}try{await app.discover();}catch{}try{await app.labelMessages();}catch{}}
+    if(organizerDue){try{app.retryHeld();}catch{}try{await app.discover();}catch{}}
     if(summaryDue){lastSummaryTick=now;try{await app.refreshSummary();}catch{}}
   }finally{organizerBusy=false;}
 },1000);organizerTimer.unref?.();

@@ -44,8 +44,13 @@ in **Ungrouped**, where a private 1–4 word label names each message's subject.
 Greetings, generic reactions, and pending labels show no badge. Grouped cards
 use their topic header without an extra label. Community reminders and sticker
 selection show the topic name or about label. Offline mode produces no labels
-and does not discover new topics. Labelling uses at most one Luna call per
-organizer tick, for up to 30 recent ungrouped messages; safety checks are batched.
+and does not discover new topics. Labelling runs independently of discovery,
+with one batch of up to 30 ungrouped messages at a time, oldest first. Older
+messages remain eligible while their session is open, so a busy chat cannot
+age them out of the queue. Safety checks are batched. Invalid structured model
+output gets one repair attempt with more output space. A failed label batch
+gets one later retry, then yields to other messages without storing a false
+empty label.
 Quiet chats can accumulate topic evidence for up to five minutes; busy chats
 still retire older candidates after newer messages arrive. Explicit replies
 take precedence over intervening conversation when interpreting short follow-ups.
@@ -59,7 +64,11 @@ topic discovery and stay out of the topic reader, including Ungrouped. Messages
 with text alongside emojis still participate; reaction-only messages remain in
 the retained chat history.
 Naming can revisit recent assignments with weak confidence or narrow margins,
-and explicitly reuse an existing topic while broadening its name or description.
+and propose reusing an existing topic while broadening its name or description.
+Jev independently checks reuse. A renamed topic must still match a sample of
+its opening and latest messages, including openings older than five minutes.
+When an explicit reply matches its parent topic but a different topic scores
+higher, Jev compares the two directly before assignment.
 Matching also receives a message's existing about label as context. Discovery
 revisits recent assignments when a topic appears or changes. Moving an
 already grouped message requires both a strong relevance score and a direct JEV
@@ -187,7 +196,9 @@ Each message's `category` is its original stored class (`question`, `funny`,
 `opinion`, `reaction`, or `other`). For messages skipped by the organizer,
 `other` can be the app's fallback rather than a JEV decision. Replay logs show
 topic names or about labels. Downloaded results retain `category` and
-`recordedCategory` and include `about`. Older recordings without labels still
+`recordedCategory` and include `about` and `labelAttempts`. A null `about` with
+`labelAttempts: 2` means labeling failed after its retry; an empty `about` means
+the completed check found no suitable label. Older recordings without labels still
 load; saved labels are optional in `previousResult`.
 The snapshot also includes the current settings and blocked-topic rules.
 
@@ -203,8 +214,9 @@ the beginning. **1×** preserves the recorded intervals; **Pause**, **Resume**,
 absolute deadlines, so an AI request taking longer does not delay later messages.
 The organizer's clock advances with the replay, including while changing speed.
 Pause freezes message delivery and that clock; AI requests already running can
-finish. After the last arrival, processing continues briefly for normal topic
-discovery and the existing failed-classification retry.
+finish. After the last arrival, processing continues for normal topic discovery,
+the existing failed-classification retry, and any remaining eligible label
+batches. Large label queues can extend this processing period.
 
 Every replay starts with empty messages, topics, and session history and runs
 the current classifier again. Restart keeps settings and blocked-topic edits

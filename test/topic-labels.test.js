@@ -16,7 +16,7 @@ function setup(t,model={}){
     send:(id,text,extra={})=>app.ingest({id,text,viewerId:id,name:id,...extra})};
 }
 
-test('labelling selects only recent ungrouped readable messages, newest first, once',async t=>{
+test('labelling selects ungrouped readable messages oldest first without aging out a backlog',async t=>{
   const inputs=[];
   const {app,send,advance}=setup(t,{labelMessages:async input=>{inputs.push(input);return input.targets.map(m=>m.text==='hello'?null:'Tea choice');}});
   await send('old','Older question');advance(301);
@@ -29,7 +29,7 @@ test('labelling selects only recent ungrouped readable messages, newest first, o
   await send('tea','What tea?');await send('hello','hello');
   await app.labelMessages();await app.labelMessages();
   assert.equal(inputs.length,1);
-  assert.deepEqual(inputs[0].targets.map(m=>m.text),['hello','What tea?']);
+  assert.deepEqual(inputs[0].targets.map(m=>m.text),['Older question','What tea?','hello']);
   assert.equal(app.one("SELECT about FROM messages WHERE id='hello'").about,'');
   assert.equal(app.rows().find(m=>m.id==='tea').about,'Tea choice');
   assert.doesNotMatch(JSON.stringify(inputs[0].earlierChat),/Automated|!help|😂|Tell AI|Hidden|Waiting/);
@@ -41,9 +41,10 @@ test('labelling caps each batch at thirty and reuses labels with reply context',
   for(let i=0;i<35;i++)await send(`line-${i}`,`tea detail ${i}`,i===34?{parentId:'line-0'}:{});
   await app.labelMessages();await app.labelMessages();
   assert.deepEqual(inputs.map(i=>i.targets.length),[30,5]);
-  assert.equal(inputs[0].targets[0].reply,'tea detail 0');
+  assert.equal(inputs[1].targets.at(-1).reply,'tea detail 0');
   assert.deepEqual(inputs[1].existingLabels,['Tea choice']);
-  assert.equal(inputs[0].earlierChat.length,5);
+  assert.equal(inputs[0].earlierChat.length,0);
+  assert.equal(inputs[1].earlierChat.length,20);
 });
 
 test('null, generic, blocked and software instruction labels are stored as no subject',async t=>{
@@ -55,7 +56,54 @@ test('null, generic, blocked and software instruction labels are stored as no su
   for(let i=0;i<5;i++)await send(String(i),`readable line ${i}`);
   await app.labelMessages();await app.labelMessages();
   assert.equal(safetyCalls,1);
-  assert.deepEqual(app.all('SELECT about FROM messages ORDER BY rowid DESC').map(m=>m.about),['Tea choice','','','','']);
+  assert.deepEqual(app.all('SELECT about FROM messages ORDER BY rowid').map(m=>m.about),['Tea choice','','','','']);
+});
+
+test('new arrivals cannot displace older label batches after the discovery window expires',async t=>{
+  const batches=[];
+  const {app,send,advance}=setup(t,{labelMessages:async({targets})=>{batches.push(targets.map(m=>m.text));return targets.map(()=> 'Tea choice');}});
+  for(let i=0;i<65;i++)await send(`old-${i}`,`old question ${i}`);
+  advance(600);
+  await send('new','new question');
+  await app.labelMessages();await app.labelMessages();await app.labelMessages();
+  assert.deepEqual(batches.map(batch=>batch.length),[30,30,6]);
+  assert.equal(batches[0][0],'old question 0');
+  assert.equal(batches.at(-1).at(-1),'new question');
+  assert.equal(app.labelTargets().length,0);
+  assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE about='Tea choice'").n,66);
+});
+
+test('a persistently invalid label batch is reported as failed and does not block later messages',async t=>{
+  let calls=0;
+  const {app,send}=setup(t,{labelMessages:async({targets})=>++calls<=2?[]:targets.map(()=> 'Tea choice')});
+  for(let i=0;i<31;i++)await send(`m-${i}`,`tea detail ${i}`);
+  await assert.rejects(app.labelMessages(),/Invalid message labels/);
+  assert.equal(app.one("SELECT label_attempts FROM messages WHERE id='m-0'").label_attempts,1);
+  await assert.rejects(app.labelMessages(),/Invalid message labels/);
+  await app.labelMessages();
+  assert.equal(app.one("SELECT COUNT(*) AS n FROM messages WHERE about IS NULL AND label_attempts=2").n,30);
+  assert.equal(app.one("SELECT about FROM messages WHERE id='m-30'").about,'Tea choice');
+  assert.equal(app.labelTargets().length,0);
+  assert.equal(app.pending.size,0);
+});
+
+test('successful retry clears the label failure count and stores the recovered label',async t=>{
+  let calls=0;
+  const {app,send}=setup(t,{labelMessages:async()=>++calls===1?[]:['Tea choice']});
+  await send('tea','Which tea?');
+  await assert.rejects(app.labelMessages(),/Invalid message labels/);
+  await app.labelMessages();
+  assert.deepEqual({...app.one("SELECT about,label_attempts FROM messages WHERE id='tea'")},{about:'Tea choice',label_attempts:0});
+});
+
+test('an older backlog does not use labels from messages that arrived later',async t=>{
+  let input;
+  const {app,send}=setup(t,{labelMessages:async value=>{input=value;return ['Tea choice'];}});
+  await send('earlier','What tea?');await send('later','The camera is blurry');
+  app.run("UPDATE messages SET about='Camera focus' WHERE id='later'");
+  await app.labelMessages();
+  assert.deepEqual(input.existingLabels,[]);
+  assert.deepEqual(input.targets.map(m=>m.text),['What tea?']);
 });
 
 test('label work runs once at a time and discards an aborted revision',async t=>{
