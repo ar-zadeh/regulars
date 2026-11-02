@@ -1,5 +1,6 @@
 .env
 data/
+chat_examples/
 node_modules/
 *.log
 __pycache__/
